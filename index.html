@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Langkah Mandiri — Monitoring Pendapatan Peserta</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          brand: {
+            50: "#FEF2ED", 100: "#FDE1D3", 200: "#FBC3A7", 300: "#F8A47B",
+            400: "#F58A5A", 500: "#F26B35", 600: "#DD5623", 700: "#B8441A",
+            800: "#8F3515", 900: "#6B280F",
+          },
+        },
+      },
+    },
+  };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+<!-- Firebase (compat SDK, no build step needed) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');
+  body { font-family: 'Inter', sans-serif; background: #fafaf9; }
+  .font-display { font-family: 'Space Grotesk', sans-serif; }
+  .font-mono { font-family: 'JetBrains Mono', monospace; }
+  input:focus, textarea:focus, select:focus { outline: none; }
+</style>
+</head>
+<body class="text-stone-800">
+<div id="root" class="min-h-screen"></div>
+
+<script>
+/* =====================================================================
+   1) FIREBASE SETUP — GANTI DENGAN KONFIGURASI PROYEK FIREBASE ANDA
+   =====================================================================
+   Cara mendapatkan nilai ini:
+   1. Buka https://console.firebase.google.com → buat proyek baru (gratis).
+   2. Tambahkan "Web App" di pengaturan proyek → salin firebaseConfig di sini.
+   3. Aktifkan "Firestore Database" (mode production) di menu Build.
+   4. Aktifkan "Authentication" → Sign-in method → Email/Password.
+   5. Di tab Authentication → Users, tambahkan 1 akun untuk admin (email + password).
+   6. Di Firestore → Rules, tempel aturan yang ada di bagian PALING BAWAH file ini
+      (lihat komentar FIRESTORE SECURITY RULES) lalu klik Publish.
+   Aplikasi ini realtime: perubahan data (input pendapatan peserta, catatan
+   admin, dll) langsung muncul di semua layar yang terbuka tanpa perlu refresh.
+   ===================================================================== */
+const firebaseConfig = {
+  apiKey: "AIzaSyBISt5kMzLVWvvS5xof7gDUWSe1XTTUihg",
+  authDomain: "pp-keluar-gk.firebaseapp.com",
+  projectId: "pp-keluar-gk",
+  storageBucket: "pp-keluar-gk.firebasestorage.app",
+  messagingSenderId: "252223028881",
+  appId: "1:252223028881:web:1436030de4e9b0a93dc930"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+const auth = firebase.auth();
+
+const LOGO_SRC = "data:image/png;base64,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";
+
+/* =====================================================================
+   2) HELPERS
+   ===================================================================== */
+const rupiah = (n) => "Rp " + Math.round(n || 0).toLocaleString("id-ID");
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const fmtDate = (iso) => new Date(iso).toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" });
+function initials(nama) {
+  return (nama || "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
+}
+
+const STAGES = {
+  baru: { label: "Baru Bergabung", step: 0, bg: "bg-stone-200", text: "text-stone-700", bar: "bg-stone-400" },
+  mulai: { label: "Mulai Berusaha", step: 1, bg: "bg-amber-100", text: "text-amber-800", bar: "bg-amber-500" },
+  berkembang: { label: "Berkembang", step: 2, bg: "bg-brand-100", text: "text-brand-800", bar: "bg-brand-500" },
+  mandiri: { label: "Mandiri", step: 3, bg: "bg-emerald-100", text: "text-emerald-800", bar: "bg-emerald-600" },
+};
+const STAGE_ORDER = ["baru", "mulai", "berkembang", "mandiri"];
+
+const JENIS_INTERVENSI = ["Kaki Palsu / Alat Bantu", "Bantuan Modal Usaha", "Pelatihan Usaha", "Pendampingan", "Lainnya"];
+
+function sortedEntries(entries) {
+  return [...(entries || [])].sort((a, b) => a.tanggal.localeCompare(b.tanggal));
+}
+function sortedDesc(entries) {
+  return [...(entries || [])].sort((a, b) => b.tanggal.localeCompare(a.tanggal));
+}
+function householdSize(p) { return (Number(p.jumlahTanggungan) || 0) + 1; }
+function lastIncome(entries) {
+  const s = sortedEntries(entries);
+  return s.length ? Number(s[s.length - 1].jumlah) || 0 : 0;
+}
+function getStage(entries, p, povertyLine) {
+  const s = sortedEntries(entries);
+  if (s.length === 0) return "baru";
+  const hh = householdSize(p);
+  const last4 = s.slice(-4);
+  const above = last4.every((e) => (Number(e.jumlah) || 0) / hh >= povertyLine);
+  if (above) return "mandiri";
+  if (s.length >= 2) {
+    const first = Number(s[0].jumlah) || 0;
+    const last = Number(s[s.length - 1].jumlah) || 0;
+    if (last > first) return "berkembang";
+  }
+  return "mulai";
+}
+function getTrend(entries) {
+  const s = sortedEntries(entries);
+  if (s.length < 2) return { pct: null, dir: "flat" };
+  const first = Number(s[0].jumlah) || 0;
+  const last = Number(s[s.length - 1].jumlah) || 0;
+  if (first === 0) return { pct: null, dir: last > 0 ? "up" : "flat" };
+  const pct = ((last - first) / first) * 100;
+  return { pct, dir: pct > 1 ? "up" : pct < -1 ? "down" : "flat" };
+}
+
+const ICON = {
+  phone: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3.1-8.7A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .3 2 .7 2.9a2 2 0 0 1-.4 2.1L8 10a16 16 0 0 0 6 6l1.3-1.4a2 2 0 0 1 2.1-.4c.9.4 1.9.6 2.9.7a2 2 0 0 1 1.7 2z"/></svg>`,
+  map: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>`,
+  users: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9"/><path d="M16 3.1a4 4 0 0 1 0 7.8"/></svg>`,
+  briefcase: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>`,
+  package: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><path d="M21 8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/></svg>`,
+  plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="w-full h-full"><path d="M12 5v14M5 12h14"/></svg>`,
+  edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>`,
+  trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>`,
+  link: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1-1"/></svg>`,
+  award: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><circle cx="12" cy="8" r="6"/><path d="M8.2 13.5 7 22l5-3 5 3-1.2-8.5"/></svg>`,
+  up: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="w-full h-full"><path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/></svg>`,
+  down: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="w-full h-full"><path d="M23 18l-9.5-9.5-5 5L1 6"/><path d="M17 18h6v-6"/></svg>`,
+  minus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="w-full h-full"><path d="M5 12h14"/></svg>`,
+  settings: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9c.1.7.6 1.3 1.5 1.4h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.4 1z"/></svg>`,
+  back: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="w-full h-full"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>`,
+  check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="w-full h-full"><path d="M20 6 9 17l-5-5"/></svg>`,
+  x: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="w-full h-full"><path d="M18 6 6 18M6 6l12 12"/></svg>`,
+  info: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>`,
+  copy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
+  camera: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>`,
+  clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>`,
+  heart: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-full h-full"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.8 1-1a5.5 5.5 0 0 0 0-7.6z"/></svg>`,
+};
+function icon(name, cls) { return `<span class="${cls}">${ICON[name]}</span>`; }
+
+function stageBadge(stage, small) {
+  const m = STAGES[stage];
+  return `<span class="inline-flex items-center gap-1.5 rounded-full ${m.bg} ${m.text} font-semibold ${small ? "text-xs px-2.5 py-1" : "text-sm px-3 py-1.5"}">
+    ${icon("award", small ? "w-3 h-3" : "w-3.5 h-3.5")} ${m.label}</span>`;
+}
+function stepTrack(stage) {
+  const cur = STAGES[stage].step;
+  return `<div class="flex items-center gap-1 w-full">${STAGE_ORDER.map((k, i) => {
+    const filled = i <= cur;
+    return `<div class="flex-1 flex items-center gap-1">
+      <div class="h-1.5 flex-1 rounded-full ${filled ? STAGES[k].bar : "bg-stone-200"}"></div>
+      ${i < STAGE_ORDER.length - 1 ? `<span class="w-2 h-2 rounded-full flex-shrink-0 ${filled ? "bg-brand-600" : "bg-stone-300"}"></span>` : ""}
+    </div>`;
+  }).join("")}</div>`;
+}
+function trendPill(trend) {
+  if (trend.pct === null) return `<span class="inline-flex items-center gap-1 text-xs text-stone-500">${icon("minus", "w-3 h-3")} Belum cukup data</span>`;
+  const up = trend.dir === "up", down = trend.dir === "down";
+  const cls = up ? "text-emerald-700" : down ? "text-rose-600" : "text-stone-500";
+  return `<span class="inline-flex items-center gap-1 text-xs font-mono font-semibold ${cls}">
+    ${icon(up ? "up" : down ? "down" : "minus", "w-3.5 h-3.5")} ${trend.pct > 0 ? "+" : ""}${trend.pct.toFixed(0)}%</span>`;
+}
+function infoRow(iconName, label, value) {
+  return `<div class="flex items-start gap-2.5 text-sm">
+    <span class="w-4 h-4 text-brand-600 mt-0.5 flex-shrink-0">${ICON[iconName]}</span>
+    <div class="min-w-0"><div class="text-[11px] uppercase tracking-wide text-stone-400 font-medium">${label}</div>
+    <div class="text-stone-800 break-words">${value || "-"}</div></div></div>`;
+}
+
+/* ---------- KTP-STYLE IDENTITY CARD ---------- */
+function identityCardHTML(p, stage) {
+  const photo = p.fotoBase64
+    ? `<img src="${p.fotoBase64}" class="w-full h-full object-cover" />`
+    : `<div class="w-full h-full flex items-center justify-center bg-brand-100 text-brand-700 font-display font-bold text-2xl">${initials(p.nama)}</div>`;
+  const rows = [
+    ["NIK", p.nik], ["Nama", p.nama], ["Alamat", p.alamat],
+    ["No. Telp", p.noTelpon], ["Tanggungan", `${p.jumlahTanggungan || 0} orang`],
+    ["Jenis Usaha", p.jenisUsaha], ["Produk Usaha", p.produkUsaha],
+  ];
+  return `<div class="rounded-2xl overflow-hidden border border-brand-200 shadow-sm bg-white">
+    <div class="bg-gradient-to-r from-brand-600 to-brand-500 px-4 py-2.5 flex items-center gap-2.5">
+      <div class="w-8 h-8 rounded-md bg-white flex items-center justify-center p-1 flex-shrink-0">
+        <img src="${LOGO_SRC}" class="w-full h-full object-contain" />
+      </div>
+      <div class="text-white leading-tight min-w-0">
+        <div class="text-[9px] uppercase tracking-wider opacity-90">Rumah Zakat · Langkah Mandiri</div>
+        <div class="text-xs font-bold tracking-wide font-display">KARTU PESERTA PROGRAM</div>
+      </div>
+      ${stage ? `<div class="ml-auto flex-shrink-0">${stageBadge(stage, true)}</div>` : ""}
+    </div>
+    <div class="p-4 flex gap-4">
+      <div class="w-20 sm:w-24 h-24 sm:h-28 rounded-lg overflow-hidden bg-stone-100 flex-shrink-0 border border-stone-200">${photo}</div>
+      <div class="flex-1 min-w-0">
+        <table class="w-full text-xs sm:text-sm">
+          ${rows.map(([label, val]) => `<tr>
+            <td class="text-stone-400 align-top py-0.5 pr-2 whitespace-nowrap w-24 sm:w-28 font-medium">${label}</td>
+            <td class="text-stone-400 align-top py-0.5 pr-1">:</td>
+            <td class="text-stone-800 align-top py-0.5 font-medium break-words">${val || "-"}</td>
+          </tr>`).join("")}
+        </table>
+      </div>
+    </div>
+    <div class="h-1.5 bg-gradient-to-r from-brand-600 via-brand-400 to-brand-600"></div>
+  </div>`;
+}
+
+/* =====================================================================
+   3) FIRESTORE DATA LAYER (realtime)
+   ===================================================================== */
+function addIncomeEntry(nik, entry) {
+  return db.collection("participants").doc(nik).collection("income").add(entry);
+}
+function saveParticipantDoc(nik, data) {
+  return db.collection("participants").doc(nik).set(data, { merge: true });
+}
+async function deleteParticipantDoc(nik) {
+  const ref = db.collection("participants").doc(nik);
+  const [incomeSnap, interSnap] = await Promise.all([ref.collection("income").get(), ref.collection("interventions").get()]);
+  const batch = db.batch();
+  incomeSnap.docs.forEach((d) => batch.delete(d.ref));
+  interSnap.docs.forEach((d) => batch.delete(d.ref));
+  batch.delete(ref);
+  return batch.commit();
+}
+function saveSettingsDoc(data) {
+  return db.collection("settings").doc("general").set(data, { merge: true });
+}
+function addIntervention(nik, data) {
+  return db.collection("participants").doc(nik).collection("interventions").add(data);
+}
+function deleteIntervention(nik, id) {
+  return db.collection("participants").doc(nik).collection("interventions").doc(id).delete();
+}
+
+/* realtime subscription helpers */
+let unsubs = [];
+function clearSubs() { unsubs.forEach((u) => { try { u(); } catch (e) {} }); unsubs = []; }
+function track(u) { unsubs.push(u); }
+
+function subscribeParticipant(nik, cb) {
+  return db.collection("participants").doc(nik).onSnapshot((doc) => cb(doc.exists ? doc.data() : null));
+}
+function subscribeIncome(nik, cb) {
+  return db.collection("participants").doc(nik).collection("income").orderBy("tanggal")
+    .onSnapshot((snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
+}
+function subscribeInterventions(nik, cb) {
+  return db.collection("participants").doc(nik).collection("interventions").orderBy("tanggal", "desc")
+    .onSnapshot((snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
+}
+function subscribeSettings(cb) {
+  return db.collection("settings").doc("general").onSnapshot((doc) => cb(doc.exists ? doc.data() : { povertyLine: 550458 }));
+}
+function subscribeParticipants(cb) {
+  return db.collection("participants").orderBy("nama").onSnapshot((snap) => cb(snap.docs.map((d) => d.data())));
+}
+
+/* =====================================================================
+   4) APP STATE + ROUTING
+   ===================================================================== */
+const params = new URLSearchParams(location.search);
+const NIK_PARAM = params.get("p");
+const IS_ADMIN_ROUTE = params.get("admin") === "1";
+
+let state = {
+  view: "loading",
+  participant: null,
+  entries: [],
+  interventions: [],
+  povertyLine: 550458,
+  participants: [],
+  incomeMap: {},
+  incomeUnsubMap: {},
+  saving: false,
+  noteOpen: false,
+  showForm: false,
+  editing: null,
+  confirmDelete: null,
+  formError: "",
+  loginError: "",
+  linkCopiedNik: null,
+  showInterventionForm: false,
+};
+let chartRef = null;
+let pendingPhotoBase64 = null;
+
+function root() { return document.getElementById("root"); }
+function render() {
+  root().innerHTML = viewHTML();
+  drawChartIfNeeded();
+}
+
+function init() {
+  if (NIK_PARAM) {
+    state.view = "peserta-loading";
+    render();
+    track(subscribeParticipant(NIK_PARAM, (p) => {
+      if (!p) { state.view = "no-access"; render(); return; }
+      state.participant = p;
+      state.view = "peserta";
+      render();
+    }));
+    track(subscribeIncome(NIK_PARAM, (entries) => { state.entries = entries; if (state.view === "peserta") render(); }));
+    track(subscribeInterventions(NIK_PARAM, (list) => { state.interventions = list; if (state.view === "peserta") render(); }));
+    track(subscribeSettings((s) => { state.povertyLine = s.povertyLine || 550458; if (state.view === "peserta") render(); }));
+    return;
+  }
+  if (IS_ADMIN_ROUTE) {
+    auth.onAuthStateChanged((user) => {
+      clearSubs();
+      if (user) { state.view = "admin"; startAdminSubs(); }
+      else { state.view = "admin-login"; render(); }
+    });
+    return;
+  }
+  state.view = "no-access";
+  render();
+}
+
+function startAdminSubs() {
+  track(subscribeSettings((s) => { state.povertyLine = s.povertyLine || 550458; render(); }));
+  track(subscribeParticipants((list) => {
+    state.participants = list;
+    // subscribe income for any new participant not yet tracked
+    list.forEach((p) => {
+      if (!state.incomeUnsubMap[p.nik]) {
+        state.incomeUnsubMap[p.nik] = subscribeIncome(p.nik, (entries) => {
+          state.incomeMap[p.nik] = entries;
+          render();
+        });
+      }
+    });
+    // cleanup listeners for removed participants
+    Object.keys(state.incomeUnsubMap).forEach((nik) => {
+      if (!list.find((p) => p.nik === nik)) {
+        state.incomeUnsubMap[nik]();
+        delete state.incomeUnsubMap[nik];
+        delete state.incomeMap[nik];
+      }
+    });
+    render();
+  }));
+}
+
+/* =====================================================================
+   5) ACTIONS
+   ===================================================================== */
+function submitIncome() {
+  const val = Number(document.getElementById("incomeInput").value);
+  if (!val || val < 0) { state.formError = "Masukkan jumlah pendapatan yang benar."; render(); return; }
+  const catatan = state.noteOpen ? (document.getElementById("noteInput")?.value || "") : "";
+  state.saving = true; state.formError = ""; render();
+  addIncomeEntry(state.participant.nik, { tanggal: todayISO(), jumlah: val, catatan })
+    .catch(() => { state.formError = "Gagal menyimpan. Periksa koneksi internet Anda."; })
+    .finally(() => { state.saving = false; state.noteOpen = false; render(); });
+}
+function toggleNote() { state.noteOpen = !state.noteOpen; render(); }
+
+function adminLogin() {
+  const email = document.getElementById("loginEmail").value;
+  const pass = document.getElementById("loginPassword").value;
+  state.loginError = "";
+  auth.signInWithEmailAndPassword(email, pass).catch(() => { state.loginError = "Email atau kata sandi salah."; render(); });
+}
+function adminLogout() { auth.signOut().then(() => location.reload()); }
+
+function openParticipantForm(nik) {
+  state.editing = nik ? state.participants.find((p) => p.nik === nik) : null;
+  pendingPhotoBase64 = state.editing ? (state.editing.fotoBase64 || null) : null;
+  state.showForm = true; state.formError = "";
+  render();
+}
+function closeParticipantForm() { state.showForm = false; state.editing = null; pendingPhotoBase64 = null; render(); }
+
+function handlePhotoInput(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const img = new Image();
+    img.onload = () => {
+      const maxW = 320;
+      const scale = Math.min(1, maxW / img.width);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      pendingPhotoBase64 = canvas.toDataURL("image/jpeg", 0.72);
+      const prev = document.getElementById("photoPreview");
+      if (prev) prev.src = pendingPhotoBase64;
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function saveParticipantForm(ev) {
+  ev.preventDefault();
+  const f = ev.target;
+  const data = {
+    nama: f.nama.value.trim(),
+    nik: (state.editing ? state.editing.nik : f.nik.value.trim()),
+    noTelpon: f.noTelpon.value.trim(),
+    alamat: f.alamat.value.trim(),
+    jumlahTanggungan: Number(f.jumlahTanggungan.value) || 0,
+    jenisUsaha: f.jenisUsaha.value.trim(),
+    produkUsaha: f.produkUsaha.value.trim(),
+    fotoBase64: pendingPhotoBase64 || null,
+  };
+  if (!data.nama || !data.nik) { state.formError = "Nama dan NIK wajib diisi."; render(); return; }
+  if (!/^\d+$/.test(data.nik)) { state.formError = "NIK hanya boleh berisi angka."; render(); return; }
+  saveParticipantDoc(data.nik, data).then(() => {
+    state.showForm = false; state.editing = null; pendingPhotoBase64 = null; render();
+  }).catch(() => { state.formError = "Gagal menyimpan data peserta."; render(); });
+}
+
+function askDelete(nik) { state.confirmDelete = state.participants.find((p) => p.nik === nik); render(); }
+function cancelDelete() { state.confirmDelete = null; render(); }
+function confirmDeleteParticipant() {
+  const nik = state.confirmDelete.nik;
+  deleteParticipantDoc(nik).then(() => { state.confirmDelete = null; render(); });
+}
+
+function savePovertyLine() {
+  const val = Number(document.getElementById("povertyLineInput").value);
+  if (isNaN(val) || val < 0) return;
+  saveSettingsDoc({ povertyLine: val });
+}
+
+function copyParticipantLink(nik) {
+  const url = `${location.origin}${location.pathname}?p=${nik}`;
+  navigator.clipboard.writeText(url).then(() => {
+    state.linkCopiedNik = nik;
+    render();
+    setTimeout(() => { state.linkCopiedNik = null; render(); }, 2000);
+  });
+}
+
+function goAdminDetail(nik) {
+  const p = state.participants.find((x) => x.nik === nik);
+  state.view = "admin-detail";
+  state.participant = p;
+  state.entries = state.incomeMap[nik] || [];
+  state.interventions = [];
+  if (state.detailInterventionUnsub) state.detailInterventionUnsub();
+  state.detailInterventionUnsub = subscribeInterventions(nik, (list) => {
+    state.interventions = list;
+    if (state.view === "admin-detail") render();
+  });
+  render();
+}
+function backToAdmin() {
+  if (state.detailInterventionUnsub) { state.detailInterventionUnsub(); state.detailInterventionUnsub = null; }
+  state.view = "admin"; state.showInterventionForm = false; render();
+}
+
+function toggleInterventionForm() { state.showInterventionForm = !state.showInterventionForm; render(); }
+function submitIntervention(ev) {
+  ev.preventDefault();
+  const f = ev.target;
+  const data = {
+    tanggal: f.tanggal.value || todayISO(),
+    jenis: f.jenis.value,
+    keterangan: f.keterangan.value.trim(),
+    nominal: f.nominal.value ? Number(f.nominal.value) : null,
+  };
+  addIntervention(state.participant.nik, data).then(() => { state.showInterventionForm = false; render(); });
+}
+function removeIntervention(id) {
+  deleteIntervention(state.participant.nik, id);
+}
+
+/* =====================================================================
+   6) VIEWS
+   ===================================================================== */
+function header(showTag) {
+  return `<header class="bg-white border-b border-stone-200">
+    <div class="max-w-5xl mx-auto px-5 py-4 flex items-center gap-3">
+      <div class="w-11 h-11 rounded-xl bg-white border border-brand-200 flex items-center justify-center flex-shrink-0 p-1.5 shadow-sm">
+        <img src="${LOGO_SRC}" class="w-full h-full object-contain" />
+      </div>
+      <div>
+        <h1 class="font-display font-bold text-lg text-stone-900 leading-none">Langkah Mandiri</h1>
+        <p class="text-xs text-stone-400 mt-0.5">${showTag || "Monitoring pendapatan peserta pasca-bantuan usaha"}</p>
+      </div>
+    </div>
+  </header>`;
+}
+
+function viewHTML() {
+  if (state.view === "loading" || state.view === "peserta-loading") return loadingHTML();
+  if (state.view === "no-access") return noAccessHTML();
+  if (state.view === "peserta") return participantHTML();
+  if (state.view === "admin-login") return adminLoginHTML();
+  if (state.view === "admin") return adminHTML();
+  if (state.view === "admin-detail") return adminDetailHTML();
+  return "";
+}
+
+function loadingHTML() {
+  return `<div class="min-h-screen flex items-center justify-center">
+    <p class="text-sm text-stone-400">Memuat data…</p></div>`;
+}
+
+function noAccessHTML() {
+  return `${header()}
+  <main class="max-w-md mx-auto px-5 py-20 text-center">
+    <div class="w-14 h-14 mx-auto rounded-2xl bg-stone-200 flex items-center justify-center text-stone-500 p-3 mb-4">${ICON.info}</div>
+    <h2 class="font-display font-bold text-xl text-stone-900 mb-2">Tautan Tidak Ditemukan</h2>
+    <p class="text-sm text-stone-500">Halaman ini hanya bisa diakses melalui tautan kartu pribadi yang diberikan oleh admin program. Silakan hubungi admin jika Anda belum menerima tautan Anda.</p>
+    <a href="?admin=1" class="inline-block mt-8 text-xs text-stone-300 hover:text-stone-500">Admin masuk di sini</a>
+  </main>`;
+}
+
+/* ---------- INTERVENTION TIMELINE (shared) ---------- */
+function interventionTimelineHTML(list, canManage) {
+  if (list.length === 0) return `<p class="text-sm text-stone-400">Belum ada riwayat intervensi.</p>`;
+  return `<div class="space-y-3">${list.map((e) => `
+    <div class="flex gap-3">
+      <div class="w-8 h-8 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center flex-shrink-0 p-2">${ICON.heart}</div>
+      <div class="flex-1 min-w-0 pb-3 border-b border-stone-100">
+        <div class="flex items-start justify-between gap-2">
+          <div>
+            <div class="text-sm font-semibold text-stone-800">${e.jenis}</div>
+            <div class="text-xs text-stone-400">${fmtDate(e.tanggal)}</div>
+          </div>
+          ${canManage ? `<button onclick="removeIntervention('${e.id}')" class="text-stone-300 hover:text-rose-600 w-3.5 h-3.5 flex-shrink-0">${ICON.trash}</button>` : ""}
+        </div>
+        ${e.keterangan ? `<p class="text-sm text-stone-600 mt-1">${e.keterangan}</p>` : ""}
+        ${e.nominal ? `<p class="text-xs font-mono font-semibold text-brand-700 mt-1">${rupiah(e.nominal)}</p>` : ""}
+      </div>
+    </div>`).join("")}</div>`;
+}
+
+/* ---------- PARTICIPANT VIEW ---------- */
+function participantHTML() {
+  const p = state.participant, entries = state.entries, pl = state.povertyLine;
+  const stage = getStage(entries, p, pl);
+  const trend = getTrend(entries);
+  const income = lastIncome(entries);
+  const sorted = sortedEntries(entries);
+
+  return `${header("Kartu Peserta Program")}
+  <main class="max-w-md mx-auto px-5 py-6 pb-16">
+
+    <div class="mb-5">${identityCardHTML(p, stage)}</div>
+
+    <div class="bg-white rounded-2xl border border-stone-200 p-4 mb-5">
+      ${stepTrack(stage)}
+    </div>
+
+    <div class="grid grid-cols-2 gap-3 mb-5">
+      <div class="rounded-xl bg-stone-100 p-4">
+        <div class="text-[11px] uppercase text-stone-500 font-medium mb-1">Pendapatan Terakhir</div>
+        <div class="font-mono font-bold text-lg text-stone-900">${rupiah(income)}</div>
+      </div>
+      <div class="rounded-xl bg-stone-100 p-4">
+        <div class="text-[11px] uppercase text-stone-500 font-medium mb-1">Tren</div>
+        ${trendPill(trend)}
+      </div>
+    </div>
+
+    <!-- SIMPLE INCOME FORM -->
+    <div class="bg-brand-600 rounded-2xl p-5 mb-5 text-white">
+      <p class="text-xs text-brand-100 mb-1">Untuk pekan ini · ${fmtDate(todayISO())}</p>
+      <label class="block text-base font-semibold mb-3">Berapa pendapatan usaha Anda pekan ini?</label>
+      <input id="incomeInput" type="number" inputmode="numeric" placeholder="Contoh: 350000"
+        class="w-full text-2xl font-mono font-bold text-stone-900 rounded-xl px-4 py-3.5 mb-3" />
+      ${state.noteOpen ? `<input id="noteInput" type="text" placeholder="Catatan singkat (opsional)"
+        class="w-full text-sm text-stone-900 rounded-xl px-4 py-2.5 mb-3" />` :
+        `<button onclick="toggleNote()" class="text-xs text-brand-100 underline mb-3">+ Tambah catatan (opsional)</button>`}
+      <button onclick="submitIncome()" ${state.saving ? "disabled" : ""}
+        class="w-full bg-white text-brand-700 font-bold text-base rounded-xl py-3.5 disabled:opacity-60 active:scale-[0.99] transition-transform">
+        ${state.saving ? "Menyimpan…" : "Simpan Pendapatan"}
+      </button>
+      ${state.formError ? `<p class="text-rose-100 text-xs mt-2">${state.formError}</p>` : ""}
+    </div>
+
+    ${sorted.length > 0 ? `
+    <div class="bg-white rounded-2xl border border-stone-200 p-5 mb-5">
+      <h3 class="font-display font-semibold text-stone-900 mb-3">Grafik Pertumbuhan</h3>
+      <canvas id="incomeChart" height="160"></canvas>
+    </div>` : ""}
+
+    <div class="bg-white rounded-2xl border border-stone-200 p-5 mb-5">
+      <h3 class="font-display font-semibold text-stone-900 mb-3">Histori Pendapatan</h3>
+      ${sorted.length === 0 ? `<p class="text-sm text-stone-400">Belum ada data pendapatan.</p>` :
+        [...sorted].reverse().map((e, i) => `
+        <div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${i % 2 === 0 ? "bg-stone-50" : ""}">
+          <div><div class="text-sm font-medium text-stone-800">Pekan ${sorted.length - i} — ${fmtDate(e.tanggal)}</div>
+          ${e.catatan ? `<div class="text-xs text-stone-400">${e.catatan}</div>` : ""}</div>
+          <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
+        </div>`).join("")}
+    </div>
+
+    <div class="bg-white rounded-2xl border border-stone-200 p-5">
+      <h3 class="font-display font-semibold text-stone-900 mb-3">Riwayat Intervensi Program</h3>
+      ${interventionTimelineHTML(state.interventions, false)}
+    </div>
+  </main>`;
+}
+
+/* ---------- ADMIN LOGIN ---------- */
+function adminLoginHTML() {
+  return `${header("Masuk Admin")}
+  <main class="max-w-sm mx-auto px-5 py-16">
+    <div class="bg-white rounded-2xl border border-stone-200 p-6">
+      <h2 class="font-display font-bold text-xl text-stone-900 mb-4">Masuk sebagai Admin</h2>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs font-medium text-stone-500 block mb-1">Email</label>
+          <input id="loginEmail" type="email" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-stone-500 block mb-1">Kata Sandi</label>
+          <input id="loginPassword" type="password" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        ${state.loginError ? `<p class="text-rose-600 text-xs">${state.loginError}</p>` : ""}
+        <button onclick="adminLogin()" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-semibold text-sm rounded-lg py-2.5">Masuk</button>
+      </div>
+    </div>
+  </main>`;
+}
+
+/* ---------- ADMIN DASHBOARD ---------- */
+function adminHTML() {
+  const { participants, incomeMap, povertyLine } = state;
+  let mandiri = 0, belumData = 0, totalGrowth = 0, growthCount = 0;
+  participants.forEach((p) => {
+    const entries = incomeMap[p.nik] || [];
+    if (getStage(entries, p, povertyLine) === "mandiri") mandiri++;
+    if (entries.length === 0) belumData++;
+    const t = getTrend(entries);
+    if (t.pct !== null) { totalGrowth += t.pct; growthCount++; }
+  });
+  const avgGrowth = growthCount ? totalGrowth / growthCount : null;
+
+  const rows = participants.map((p) => {
+    const entries = incomeMap[p.nik] || [];
+    const stage = getStage(entries, p, povertyLine);
+    const trend = getTrend(entries);
+    const hh = householdSize(p);
+    const perCapita = lastIncome(entries) / hh;
+    return `<tr class="border-b border-stone-50 hover:bg-stone-50/70">
+      <td class="py-2.5 pr-3">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-full overflow-hidden bg-brand-100 flex-shrink-0 flex items-center justify-center text-brand-700 text-xs font-bold">
+            ${p.fotoBase64 ? `<img src="${p.fotoBase64}" class="w-full h-full object-cover" />` : initials(p.nama)}
+          </div>
+          <div>
+            <button onclick="goAdminDetail('${p.nik}')" class="font-medium text-brand-700 hover:underline text-left">${p.nama}</button>
+            <div class="font-mono text-[11px] text-stone-400">${p.nik}</div>
+          </div>
+        </div>
+      </td>
+      <td class="py-2.5 pr-3 text-stone-600">${p.jenisUsaha || "-"}</td>
+      <td class="py-2.5 pr-3 font-mono text-stone-800">${rupiah(lastIncome(entries))}</td>
+      <td class="py-2.5 pr-3 font-mono text-stone-800">${rupiah(perCapita)}</td>
+      <td class="py-2.5 pr-3">${stageBadge(stage, true)}</td>
+      <td class="py-2.5 pr-3">${trendPill(trend)}</td>
+      <td class="py-2.5 pr-3">
+        <div class="flex items-center gap-2">
+          <button onclick="copyParticipantLink('${p.nik}')" class="text-stone-400 hover:text-brand-700 w-4 h-4" title="Salin tautan peserta">${ICON.link}</button>
+          ${state.linkCopiedNik === p.nik ? `<span class="text-[10px] text-emerald-600">Disalin!</span>` : ""}
+          <button onclick="openParticipantForm('${p.nik}')" class="text-stone-400 hover:text-brand-700 w-4 h-4" title="Ubah">${ICON.edit}</button>
+          <button onclick="askDelete('${p.nik}')" class="text-stone-400 hover:text-rose-600 w-4 h-4" title="Hapus">${ICON.trash}</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+
+  return `${header("Dashboard Admin")}
+  <main class="max-w-5xl mx-auto px-5 py-8 pb-16">
+    <div class="flex items-center justify-between mb-4">
+      <span class="inline-flex items-center gap-1.5 text-xs text-emerald-600 font-medium"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Realtime aktif</span>
+      <button onclick="adminLogout()" class="text-xs text-stone-400 hover:text-stone-700">Keluar</button>
+    </div>
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      ${[
+        ["Total Peserta", participants.length, "text-stone-900"],
+        ["Sudah Mandiri", mandiri, "text-emerald-700"],
+        ["Belum Ada Data", belumData, "text-amber-700"],
+        ["Rata-rata Pertumbuhan", avgGrowth === null ? "—" : `${avgGrowth > 0 ? "+" : ""}${avgGrowth.toFixed(0)}%`, avgGrowth > 0 ? "text-emerald-700" : "text-stone-900"],
+      ].map(([label, val, cls]) => `
+        <div class="bg-white rounded-2xl border border-stone-200 p-5">
+          <div class="text-[11px] uppercase text-stone-400 font-medium mb-1">${label}</div>
+          <div class="font-display font-bold text-2xl ${cls}">${val}</div>
+        </div>`).join("")}
+    </div>
+
+    <div class="bg-white rounded-2xl border border-stone-200 p-5 mb-6 flex flex-wrap items-end gap-3">
+      <div class="flex-1 min-w-[220px]">
+        <label class="text-xs font-medium text-stone-500 flex items-center gap-1.5 mb-1.5">
+          <span class="w-3.5 h-3.5">${ICON.settings}</span> Garis Kemiskinan (per kapita / bulan)
+        </label>
+        <input id="povertyLineInput" type="number" value="${povertyLine}" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm font-mono" />
+      </div>
+      <button onclick="savePovertyLine()" class="px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg">Simpan Ambang</button>
+      <p class="text-xs text-stone-400 basis-full flex items-start gap-1.5">
+        <span class="w-3.5 h-3.5 mt-0.5 flex-shrink-0">${ICON.info}</span>
+        Sesuaikan dengan data Garis Kemiskinan BPS terbaru untuk wilayah program Anda.
+      </p>
+    </div>
+
+    <div class="bg-white rounded-2xl border border-stone-200 p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-display font-semibold text-stone-900">Data Peserta Program</h3>
+        <button onclick="openParticipantForm(null)" class="inline-flex items-center gap-1.5 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg px-3.5 py-2">
+          <span class="w-4 h-4">${ICON.plus}</span> Tambah Peserta
+        </button>
+      </div>
+      ${participants.length === 0 ? `<p class="text-sm text-stone-400 py-6 text-center">Belum ada peserta terdaftar.</p>` : `
+      <div class="overflow-x-auto"><table class="w-full text-sm">
+        <thead><tr class="text-left text-[11px] uppercase text-stone-400 font-medium border-b border-stone-100">
+          <th class="py-2 pr-3">Nama</th><th class="py-2 pr-3">Jenis Usaha</th><th class="py-2 pr-3">Pendapatan Terakhir</th>
+          <th class="py-2 pr-3">Per Kapita</th><th class="py-2 pr-3">Status</th><th class="py-2 pr-3">Tren</th><th class="py-2 pr-3"></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>`}
+    </div>
+  </main>
+
+  ${state.showForm ? participantFormModal() : ""}
+  ${state.confirmDelete ? confirmDeleteModal() : ""}`;
+}
+
+function adminDetailHTML() {
+  const p = state.participant, entries = state.entries, pl = state.povertyLine;
+  const stage = getStage(entries, p, pl);
+  const sorted = sortedEntries(entries);
+  return `${header("Detail Peserta")}
+  <main class="max-w-2xl mx-auto px-5 py-8 pb-16">
+    <button onclick="backToAdmin()" class="inline-flex items-center gap-1.5 text-sm text-stone-500 hover:text-brand-700 mb-5">
+      <span class="w-4 h-4">${ICON.back}</span> Kembali ke dashboard
+    </button>
+
+    <div class="mb-5">${identityCardHTML(p, stage)}</div>
+
+    <button onclick="copyParticipantLink('${p.nik}')" class="mb-5 inline-flex items-center gap-1.5 text-xs font-medium text-brand-700 hover:underline">
+      <span class="w-3.5 h-3.5">${ICON.copy}</span> ${state.linkCopiedNik === p.nik ? "Tautan disalin!" : "Salin tautan kartu peserta ini"}
+    </button>
+
+    ${sorted.length > 0 ? `<div class="bg-white rounded-2xl border border-stone-200 p-6 mb-5">
+      <h3 class="font-display font-semibold text-stone-900 mb-3">Grafik Pertumbuhan</h3>
+      <canvas id="incomeChart" height="160"></canvas>
+    </div>` : ""}
+
+    <div class="bg-white rounded-2xl border border-stone-200 p-6 mb-5">
+      <h3 class="font-display font-semibold text-stone-900 mb-3">Histori Pendapatan</h3>
+      ${sorted.length === 0 ? `<p class="text-sm text-stone-400">Belum ada data.</p>` :
+        [...sorted].reverse().map((e, i) => `
+        <div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${i % 2 === 0 ? "bg-stone-50" : ""}">
+          <div><div class="text-sm font-medium text-stone-800">Pekan ${sorted.length - i} — ${fmtDate(e.tanggal)}</div>
+          ${e.catatan ? `<div class="text-xs text-stone-400">${e.catatan}</div>` : ""}</div>
+          <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
+        </div>`).join("")}
+    </div>
+
+    <div class="bg-white rounded-2xl border border-stone-200 p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-display font-semibold text-stone-900">Riwayat Intervensi</h3>
+        <button onclick="toggleInterventionForm()" class="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg px-3 py-1.5">
+          <span class="w-3.5 h-3.5">${ICON.plus}</span> Tambah
+        </button>
+      </div>
+      ${state.showInterventionForm ? `
+      <form onsubmit="submitIntervention(event)" class="grid sm:grid-cols-2 gap-3 mb-5 bg-stone-50 rounded-xl p-4">
+        <div>
+          <label class="text-xs font-medium text-stone-500 block mb-1">Tanggal</label>
+          <input name="tanggal" type="date" value="${todayISO()}" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-stone-500 block mb-1">Jenis Intervensi</label>
+          <select name="jenis" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm">
+            ${JENIS_INTERVENSI.map((j) => `<option value="${j}">${j}</option>`).join("")}
+          </select>
+        </div>
+        <div class="sm:col-span-2">
+          <label class="text-xs font-medium text-stone-500 block mb-1">Keterangan (opsional)</label>
+          <input name="keterangan" type="text" placeholder="cth. Kaki palsu ukuran dewasa, dipasang di Klinik RZ" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-stone-500 block mb-1">Nominal Bantuan (opsional)</label>
+          <input name="nominal" type="number" placeholder="cth. 2000000" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm font-mono" />
+        </div>
+        <div class="sm:col-span-2 flex justify-end gap-2">
+          <button type="button" onclick="toggleInterventionForm()" class="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
+          <button type="submit" class="px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg">Simpan</button>
+        </div>
+      </form>` : ""}
+      ${interventionTimelineHTML(state.interventions, true)}
+    </div>
+  </main>`;
+}
+
+function participantFormModal() {
+  const ed = state.editing;
+  const fields = [
+    ["nama", "Nama Lengkap", "text"], ["nik", "NIK", "text"], ["noTelpon", "No. Telpon", "text"],
+    ["jumlahTanggungan", "Jumlah Tanggungan", "number"], ["jenisUsaha", "Jenis Usaha", "text"], ["produkUsaha", "Produk Usaha", "text"],
+  ];
+  return `<div class="fixed inset-0 bg-stone-900/40 flex items-center justify-center p-4 z-50" onclick="closeParticipantForm()">
+    <div class="bg-white rounded-2xl p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+      <div class="flex items-center justify-between mb-5">
+        <h3 class="font-display font-semibold text-lg text-stone-900">${ed ? "Ubah Data Peserta" : "Tambah Peserta Baru"}</h3>
+        <button onclick="closeParticipantForm()" class="text-stone-400 hover:text-stone-700 w-5 h-5">${ICON.x}</button>
+      </div>
+      <form onsubmit="saveParticipantForm(event)" class="space-y-3">
+
+        <div class="flex items-center gap-4">
+          <div id="photoPreviewWrap" class="w-20 h-20 rounded-xl overflow-hidden bg-stone-100 border border-stone-200 flex-shrink-0 flex items-center justify-center">
+            ${pendingPhotoBase64
+              ? `<img id="photoPreview" src="${pendingPhotoBase64}" class="w-full h-full object-cover" />`
+              : `<span class="w-6 h-6 text-stone-300">${ICON.camera}</span>`}
+          </div>
+          <div>
+            <label class="text-xs font-medium text-stone-500 block mb-1">Foto Peserta</label>
+            <input type="file" accept="image/*" onchange="handlePhotoInput(this); renderPhotoInline()" class="text-xs" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          ${fields.map(([key, label, type]) => `
+            <div class="${key === "nama" ? "col-span-2" : ""}">
+              <label class="text-xs font-medium text-stone-500 block mb-1">${label}</label>
+              <input name="${key}" type="${type}" ${ed && key === "nik" ? "disabled" : ""}
+                value="${ed ? (ed[key] ?? "") : ""}"
+                class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm disabled:bg-stone-100" />
+            </div>`).join("")}
+          <div class="col-span-2">
+            <label class="text-xs font-medium text-stone-500 block mb-1">Alamat</label>
+            <textarea name="alamat" rows="2" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm">${ed ? (ed.alamat ?? "") : ""}</textarea>
+          </div>
+        </div>
+        ${state.formError ? `<p class="text-rose-600 text-xs">${state.formError}</p>` : ""}
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" onclick="closeParticipantForm()" class="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
+          <button type="submit" class="px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg">Simpan</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
+}
+function renderPhotoInline() {
+  // photoPreview img src is updated directly by handlePhotoInput once canvas is ready; nothing else to do here.
+}
+
+function confirmDeleteModal() {
+  const p = state.confirmDelete;
+  return `<div class="fixed inset-0 bg-stone-900/40 flex items-center justify-center p-4 z-50" onclick="cancelDelete()">
+    <div class="bg-white rounded-2xl p-6 max-w-sm w-full" onclick="event.stopPropagation()">
+      <h3 class="font-display font-semibold text-rose-600 mb-3">Hapus Peserta?</h3>
+      <p class="text-sm text-stone-600 mb-5">Data <b>${p.nama}</b> beserta seluruh histori pendapatan dan intervensinya akan dihapus permanen.</p>
+      <div class="flex justify-end gap-2">
+        <button onclick="cancelDelete()" class="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
+        <button onclick="confirmDeleteParticipant()" class="px-4 py-2 text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-lg">Hapus</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* =====================================================================
+   7) CHART
+   ===================================================================== */
+function drawChartIfNeeded() {
+  const canvas = document.getElementById("incomeChart");
+  if (!canvas) return;
+  const sorted = sortedEntries(state.entries);
+  const hh = householdSize(state.participant);
+  if (chartRef) chartRef.destroy();
+  chartRef = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels: sorted.map((_, i) => `P${i + 1}`),
+      datasets: [
+        { label: "Pendapatan", data: sorted.map((e) => Number(e.jumlah) || 0), borderColor: "#DD5623", backgroundColor: "#DD5623", tension: 0.3, pointRadius: 3 },
+        { label: "Garis Kemiskinan", data: sorted.map(() => state.povertyLine * hh), borderColor: "#dc2626", borderDash: [4, 4], pointRadius: 0 },
+      ],
+    },
+    options: {
+      plugins: { legend: { labels: { font: { family: "Inter", size: 11 } } } },
+      scales: {
+        y: { ticks: { callback: (v) => (v / 1000).toFixed(0) + "k", font: { family: "JetBrains Mono", size: 10 } } },
+        x: { ticks: { font: { family: "Inter", size: 11 } } },
+      },
+    },
+  });
+}
+
+init();
+</script>
+
+<!-- =====================================================================
+FIRESTORE SECURITY RULES — tempel di Firebase Console > Firestore > Rules
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /participants/{nik} {
+      allow get: if true;
+      allow list: if request.auth != null;
+      allow write: if request.auth != null;
+
+      match /income/{entryId} {
+        allow read: if true;                    // peserta bisa lihat histori pendapatannya sendiri
+        allow create: if true;                   // peserta bisa input pendapatan tanpa login
+        allow update, delete: if request.auth != null;
+      }
+
+      match /interventions/{entryId} {
+        allow read: if true;                     // peserta bisa lihat riwayat intervensinya sendiri
+        allow write: if request.auth != null;    // hanya admin yang mencatat/menghapus intervensi
+      }
+    }
+    match /settings/{doc} {
+      allow get: if true;
+      allow list: if false;
+      allow write: if request.auth != null;
+    }
+  }
+}
+
+Catatan: "get"/"read" di path yang sudah menyertakan NIK spesifik hanya
+membuka data DI BAWAH nik tersebut — bukan daftar seluruh peserta. Hanya
+admin yang login yang bisa men-"list" (menampilkan semua) koleksi
+participants, sehingga peserta satu tidak bisa melihat data peserta lain.
+===================================================================== -->
+</body>
+</html>
