@@ -93,6 +93,38 @@ function sortedEntries(entries) {
 function sortedDesc(entries) {
   return [...(entries || [])].sort((a, b) => b.tanggal.localeCompare(a.tanggal));
 }
+function currentYM() {
+  const n = new Date();
+  return n.getFullYear() + "-" + String(n.getMonth() + 1).padStart(2, "0");
+}
+function monthLabel(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("id-ID", { month: "long", year: "numeric" });
+}
+/* Bulan berjalan (belum berakhir) ditampilkan per pekan (mentah);
+   bulan yang sudah berakhir diakumulasikan jadi satu total bulanan. */
+function groupHistoryForDisplay(entries) {
+  const sorted = sortedEntries(entries);
+  const curYM = currentYM();
+  const groups = {};
+  sorted.forEach((e) => {
+    const ym = (e.tanggal || "").slice(0, 7);
+    (groups[ym] = groups[ym] || []).push(e);
+  });
+  const items = [];
+  Object.keys(groups).sort().forEach((ym) => {
+    if (ym === curYM) {
+      groups[ym].forEach((e, idx) => {
+        items.push({ type: "weekly", label: `Pekan ${idx + 1}`, ym, entry: e });
+      });
+    } else {
+      const list = groups[ym];
+      const total = list.reduce((s, e) => s + (Number(e.jumlah) || 0), 0);
+      items.push({ type: "monthly", label: monthLabel(ym), ym, total, count: list.length, entries: list });
+    }
+  });
+  return items; // ascending (oldest first)
+}
 function householdSize(p) { return (Number(p.jumlahTanggungan) || 0) + 1; }
 function lastIncome(entries) {
   const s = sortedEntries(entries);
@@ -297,6 +329,8 @@ let state = {
   linkCopiedNik: null,
   showInterventionForm: false,
   editingIncome: null,
+  expandedMonths: {},
+  showPovertyModal: false,
 };
 let chartRef = null;
 let pendingPhotoBase64 = null;
@@ -438,10 +472,14 @@ function confirmDeleteParticipant() {
   deleteParticipantDoc(nik).then(() => { state.confirmDelete = null; render(); });
 }
 
+function openPovertyLineEdit() { state.showPovertyModal = true; render(); }
+function closePovertyLineEdit() { state.showPovertyModal = false; render(); }
 function savePovertyLine() {
   const val = Number(document.getElementById("povertyLineInput").value);
   if (isNaN(val) || val < 0) return;
   saveSettingsDoc({ povertyLine: val });
+  state.showPovertyModal = false;
+  render();
 }
 
 function copyParticipantLink(nik) {
@@ -471,6 +509,10 @@ function backToAdmin() {
   state.view = "admin"; state.showInterventionForm = false; render();
 }
 
+function toggleMonthExpand(ym) {
+  state.expandedMonths[ym] = !state.expandedMonths[ym];
+  render();
+}
 function openIncomeEdit(id) {
   const entries = state.incomeMap[state.participant.nik] || [];
   state.editingIncome = entries.find((e) => e.id === id) || null;
@@ -573,6 +615,65 @@ function interventionTimelineHTML(list, canManage) {
     </div>`).join("")}</div>`;
 }
 
+/* ---------- HISTORY ROWS (weekly for current month, monthly totals for past months) ---------- */
+function historyRowsReadOnly(items) {
+  if (items.length === 0) return `<p class="text-sm text-stone-400">Belum ada data pendapatan.</p>`;
+  return [...items].reverse().map((it, i) => {
+    if (it.type === "weekly") {
+      const e = it.entry;
+      return `<div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${i % 2 === 0 ? "bg-stone-50" : ""}">
+        <div><div class="text-sm font-medium text-stone-800">${it.label} — ${fmtDate(e.tanggal)}</div>
+        ${e.catatan ? `<div class="text-xs text-stone-400">${e.catatan}</div>` : ""}</div>
+        <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
+      </div>`;
+    }
+    return `<div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${i % 2 === 0 ? "bg-stone-50" : ""}">
+      <div><div class="text-sm font-medium text-stone-800">${it.label}</div>
+      <div class="text-xs text-stone-400">Akumulasi ${it.count} entri pekanan</div></div>
+      <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(it.total)}</div>
+    </div>`;
+  }).join("");
+}
+
+function historyRowsAdmin(items) {
+  if (items.length === 0) return `<p class="text-sm text-stone-400">Belum ada data.</p>`;
+  return [...items].reverse().map((it, i) => {
+    const zebra = i % 2 === 0 ? "bg-stone-50" : "";
+    if (it.type === "weekly") {
+      const e = it.entry;
+      return `<div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${zebra}">
+        <div><div class="text-sm font-medium text-stone-800">${it.label} — ${fmtDate(e.tanggal)}</div>
+        ${e.catatan ? `<div class="text-xs text-stone-400">${e.catatan}</div>` : ""}</div>
+        <div class="flex items-center gap-3">
+          <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
+          <button onclick="openIncomeEdit('${e.id}')" class="text-stone-400 hover:text-brand-700 w-3.5 h-3.5" title="Ubah">${ICON.edit}</button>
+          <button onclick="removeIncomeEntry('${e.id}')" class="text-stone-400 hover:text-rose-600 w-3.5 h-3.5" title="Hapus">${ICON.trash}</button>
+        </div>
+      </div>`;
+    }
+    const expanded = !!state.expandedMonths[it.ym];
+    return `<div class="rounded-lg ${zebra}">
+      <button onclick="toggleMonthExpand('${it.ym}')" class="w-full flex items-center justify-between py-2.5 px-2 text-left">
+        <div><div class="text-sm font-medium text-stone-800">${it.label}</div>
+        <div class="text-xs text-stone-400">Akumulasi ${it.count} entri pekanan · ${expanded ? "sembunyikan rincian" : "lihat rincian"}</div></div>
+        <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(it.total)}</div>
+      </button>
+      ${expanded ? `<div class="pl-3 pr-2 pb-2 space-y-1">
+        ${[...it.entries].reverse().map((e) => `
+          <div class="flex items-center justify-between py-1.5 px-2 rounded-lg bg-white border border-stone-100">
+            <div><div class="text-xs font-medium text-stone-700">${fmtDate(e.tanggal)}</div>
+            ${e.catatan ? `<div class="text-[11px] text-stone-400">${e.catatan}</div>` : ""}</div>
+            <div class="flex items-center gap-2.5">
+              <div class="font-mono text-xs font-semibold text-stone-800">${rupiah(e.jumlah)}</div>
+              <button onclick="openIncomeEdit('${e.id}')" class="text-stone-400 hover:text-brand-700 w-3 h-3" title="Ubah">${ICON.edit}</button>
+              <button onclick="removeIncomeEntry('${e.id}')" class="text-stone-400 hover:text-rose-600 w-3 h-3" title="Hapus">${ICON.trash}</button>
+            </div>
+          </div>`).join("")}
+      </div>` : ""}
+    </div>`;
+  }).join("");
+}
+
 /* ---------- PARTICIPANT VIEW ---------- */
 function participantHTML() {
   const p = state.participant, entries = state.entries, pl = state.povertyLine;
@@ -580,6 +681,7 @@ function participantHTML() {
   const trend = getTrend(entries);
   const income = lastIncome(entries);
   const sorted = sortedEntries(entries);
+  const historyItems = groupHistoryForDisplay(entries);
 
   return `${header("Kartu Peserta Program")}
   <main class="max-w-md mx-auto px-5 py-6 pb-16">
@@ -625,13 +727,7 @@ function participantHTML() {
 
     <div class="bg-white rounded-2xl border border-stone-200 p-5 mb-5">
       <h3 class="font-display font-semibold text-stone-900 mb-3">Histori Pendapatan</h3>
-      ${sorted.length === 0 ? `<p class="text-sm text-stone-400">Belum ada data pendapatan.</p>` :
-        [...sorted].reverse().map((e, i) => `
-        <div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${i % 2 === 0 ? "bg-stone-50" : ""}">
-          <div><div class="text-sm font-medium text-stone-800">Pekan ${sorted.length - i} — ${fmtDate(e.tanggal)}</div>
-          ${e.catatan ? `<div class="text-xs text-stone-400">${e.catatan}</div>` : ""}</div>
-          <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
-        </div>`).join("")}
+      ${historyRowsReadOnly(historyItems)}
     </div>
   </main>`;
 }
@@ -707,9 +803,23 @@ function adminHTML() {
 
   return `${header("Dashboard Admin")}
   <main class="max-w-5xl mx-auto px-5 py-8 pb-16">
-    <div class="flex items-center justify-between mb-4">
-      <span class="inline-flex items-center gap-1.5 text-xs text-emerald-600 font-medium"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Realtime aktif</span>
-      <button onclick="adminLogout()" class="text-xs text-stone-400 hover:text-stone-700">Keluar</button>
+    <div class="flex items-start justify-between gap-4 mb-6 flex-wrap">
+      <div>
+        <h2 class="font-display font-bold text-2xl text-stone-900">Dashboard Admin</h2>
+        <div class="flex items-center gap-3 mt-1">
+          <span class="inline-flex items-center gap-1.5 text-xs text-emerald-600 font-medium"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Realtime aktif</span>
+          <button onclick="adminLogout()" class="text-xs text-stone-400 hover:text-stone-700">Keluar</button>
+        </div>
+      </div>
+      <div class="text-right">
+        <div class="text-[11px] uppercase tracking-wide text-stone-400 font-medium flex items-center justify-end gap-1.5">
+          <span class="w-3 h-3">${ICON.settings}</span> Ambang Garis Kemiskinan
+        </div>
+        <button onclick="openPovertyLineEdit()" class="inline-flex items-center gap-2 mt-0.5 group">
+          <span class="font-mono font-bold text-lg text-brand-700">${rupiah(povertyLine)}</span>
+          <span class="w-3.5 h-3.5 text-stone-300 group-hover:text-brand-700">${ICON.edit}</span>
+        </button>
+      </div>
     </div>
 
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -723,20 +833,6 @@ function adminHTML() {
           <div class="text-[11px] uppercase text-stone-400 font-medium mb-1">${label}</div>
           <div class="font-display font-bold text-2xl ${cls}">${val}</div>
         </div>`).join("")}
-    </div>
-
-    <div class="bg-white rounded-2xl border border-stone-200 p-5 mb-6 flex flex-wrap items-end gap-3">
-      <div class="flex-1 min-w-[220px]">
-        <label class="text-xs font-medium text-stone-500 flex items-center gap-1.5 mb-1.5">
-          <span class="w-3.5 h-3.5">${ICON.settings}</span> Garis Kemiskinan (per kapita / bulan)
-        </label>
-        <input id="povertyLineInput" type="number" value="${povertyLine}" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm font-mono" />
-      </div>
-      <button onclick="savePovertyLine()" class="px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg">Simpan Ambang</button>
-      <p class="text-xs text-stone-400 basis-full flex items-start gap-1.5">
-        <span class="w-3.5 h-3.5 mt-0.5 flex-shrink-0">${ICON.info}</span>
-        Sesuaikan dengan data Garis Kemiskinan BPS terbaru untuk wilayah program Anda.
-      </p>
     </div>
 
     <div class="bg-white rounded-2xl border border-stone-200 p-6">
@@ -758,13 +854,15 @@ function adminHTML() {
   </main>
 
   ${state.showForm ? participantFormModal() : ""}
-  ${state.confirmDelete ? confirmDeleteModal() : ""}`;
+  ${state.confirmDelete ? confirmDeleteModal() : ""}
+  ${state.showPovertyModal ? povertyLineModal() : ""}`;
 }
 
 function adminDetailHTML() {
   const p = state.participant, entries = state.incomeMap[p.nik] || [], pl = state.povertyLine;
   const stage = getStage(entries, p, pl);
   const sorted = sortedEntries(entries);
+  const historyItems = groupHistoryForDisplay(entries);
   return `${header("Detail Peserta")}
   <main class="max-w-2xl mx-auto px-5 py-8 pb-16">
     <button onclick="backToAdmin()" class="inline-flex items-center gap-1.5 text-sm text-stone-500 hover:text-brand-700 mb-5">
@@ -784,20 +882,10 @@ function adminDetailHTML() {
 
     <div class="bg-white rounded-2xl border border-stone-200 p-6 mb-5">
       <h3 class="font-display font-semibold text-stone-900 mb-3">Histori Pendapatan</h3>
-      ${sorted.length === 0 ? `<p class="text-sm text-stone-400">Belum ada data.</p>` :
-        [...sorted].reverse().map((e, i) => `
-        <div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${i % 2 === 0 ? "bg-stone-50" : ""}">
-          <div><div class="text-sm font-medium text-stone-800">Pekan ${sorted.length - i} — ${fmtDate(e.tanggal)}</div>
-          ${e.catatan ? `<div class="text-xs text-stone-400">${e.catatan}</div>` : ""}</div>
-          <div class="flex items-center gap-3">
-            <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
-            <button onclick="openIncomeEdit('${e.id}')" class="text-stone-400 hover:text-brand-700 w-3.5 h-3.5" title="Ubah">${ICON.edit}</button>
-            <button onclick="removeIncomeEntry('${e.id}')" class="text-stone-400 hover:text-rose-600 w-3.5 h-3.5" title="Hapus">${ICON.trash}</button>
-          </div>
-        </div>`).join("")}
+      ${historyRowsAdmin(historyItems)}
       <p class="text-xs text-stone-400 mt-3 flex items-start gap-1.5">
         <span class="w-3.5 h-3.5 mt-0.5 flex-shrink-0">${ICON.info}</span>
-        Admin dapat mengubah tanggal dan jumlah untuk memperbaiki data awal yang salah input.
+        Data pekan berjalan ditampilkan per pekan. Bulan yang sudah berakhir otomatis diakumulasi jadi total bulanan — klik untuk melihat & mengubah rincian pekanannya.
       </p>
     </div>
 
@@ -919,6 +1007,27 @@ function participantFormModal() {
 }
 function renderPhotoInline() {
   // photoPreview img src is updated directly by handlePhotoInput once canvas is ready; nothing else to do here.
+}
+
+function povertyLineModal() {
+  return `<div class="fixed inset-0 bg-stone-900/40 flex items-center justify-center p-4 z-50" onclick="closePovertyLineEdit()">
+    <div class="bg-white rounded-2xl p-6 max-w-sm w-full" onclick="event.stopPropagation()">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-display font-semibold text-lg text-stone-900">Ubah Ambang Garis Kemiskinan</h3>
+        <button onclick="closePovertyLineEdit()" class="text-stone-400 hover:text-stone-700 w-5 h-5">${ICON.x}</button>
+      </div>
+      <label class="text-xs font-medium text-stone-500 block mb-1">Garis Kemiskinan per kapita / bulan (Rp)</label>
+      <input id="povertyLineInput" type="number" value="${state.povertyLine}" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm font-mono mb-2" />
+      <p class="text-xs text-stone-400 flex items-start gap-1.5 mb-4">
+        <span class="w-3.5 h-3.5 mt-0.5 flex-shrink-0">${ICON.info}</span>
+        Sesuaikan dengan data Garis Kemiskinan BPS terbaru untuk wilayah program Anda. Nilai ini menjadi acuan garis kemiskinan pada grafik pertumbuhan tiap peserta.
+      </p>
+      <div class="flex justify-end gap-2">
+        <button onclick="closePovertyLineEdit()" class="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
+        <button onclick="savePovertyLine()" class="px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg">Simpan</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 function confirmDeleteModal() {
