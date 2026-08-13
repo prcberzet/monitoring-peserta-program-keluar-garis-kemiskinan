@@ -30,10 +30,15 @@
 
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');
+  * { box-sizing: border-box; }
+  html, body { max-width: 100%; overflow-x: hidden; }
   body { font-family: 'Inter', sans-serif; background: #fafaf9; }
   .font-display { font-family: 'Space Grotesk', sans-serif; }
   .font-mono { font-family: 'JetBrains Mono', monospace; }
   input:focus, textarea:focus, select:focus { outline: none; }
+  .chart-wrap { position: relative; width: 100%; height: 220px; }
+  .chart-wrap canvas { max-width: 100%; }
+  .identity-table { table-layout: fixed; }
 </style>
 </head>
 <body class="text-stone-800">
@@ -84,6 +89,34 @@ const STAGES = {
   mandiri: { label: "Mandiri", step: 3, bg: "bg-emerald-100", text: "text-emerald-800", bar: "bg-emerald-600" },
 };
 const STAGE_ORDER = ["baru", "mulai", "berkembang", "mandiri"];
+
+/* Tingkat kemandirian: dihitung dari rasio pendapatan per kapita (pendapatan
+   terakhir dibagi jumlah tanggungan+1) terhadap garis kemiskinan per kapita.
+   Ambang "sangat dekat dengan garis kemiskinan" dipakai 0.9x-1x GK. */
+const INDEPENDENCE_LEVELS = {
+  mandiri: { label: "Mandiri", bg: "bg-emerald-100", text: "text-emerald-800", dot: "bg-emerald-600" },
+  aman: { label: "Aman", bg: "bg-brand-100", text: "text-brand-800", dot: "bg-brand-500" },
+  rentan: { label: "Rentan", bg: "bg-amber-100", text: "text-amber-800", dot: "bg-amber-500" },
+  sangat_rentan: { label: "Sangat Rentan", bg: "bg-orange-100", text: "text-orange-800", dot: "bg-orange-500" },
+  menuju_keluar: { label: "Menuju Keluar GK", bg: "bg-rose-100", text: "text-rose-800", dot: "bg-rose-600" },
+};
+function getIndependenceLevel(entries, p, povertyLine) {
+  if (!entries || entries.length === 0) return null;
+  const hh = householdSize(p);
+  const perCapita = lastIncome(entries) / hh;
+  const ratio = povertyLine > 0 ? perCapita / povertyLine : 0;
+  if (ratio >= 3) return "mandiri";
+  if (ratio >= 2) return "aman";
+  if (ratio >= 1) return "rentan";
+  if (ratio >= 0.9) return "sangat_rentan";
+  return "menuju_keluar";
+}
+function independenceBadge(levelKey, small) {
+  if (!levelKey) return `<span class="inline-flex items-center gap-1.5 rounded-full bg-stone-100 text-stone-500 font-semibold ${small ? "text-xs px-2.5 py-1" : "text-sm px-3 py-1.5"}">Belum ada data</span>`;
+  const m = INDEPENDENCE_LEVELS[levelKey];
+  return `<span class="inline-flex items-center gap-1.5 rounded-full ${m.bg} ${m.text} font-semibold ${small ? "text-xs px-2.5 py-1" : "text-sm px-3 py-1.5"}">
+    <span class="w-1.5 h-1.5 rounded-full ${m.dot}"></span> ${m.label}</span>`;
+}
 
 const JENIS_INTERVENSI = ["Kaki Palsu / Alat Bantu", "Bantuan Modal Usaha", "Pelatihan Usaha", "Pendampingan", "Lainnya"];
 
@@ -210,7 +243,7 @@ function infoRow(iconName, label, value) {
 }
 
 /* ---------- KTP-STYLE IDENTITY CARD ---------- */
-function identityCardHTML(p, stage) {
+function identityCardHTML(p, stage, independenceLevel) {
   const photo = p.fotoBase64
     ? `<img src="${p.fotoBase64}" class="w-full h-full object-cover" />`
     : `<div class="w-full h-full flex items-center justify-center bg-brand-100 text-brand-700 font-display font-bold text-2xl">${initials(p.nama)}</div>`;
@@ -220,7 +253,7 @@ function identityCardHTML(p, stage) {
     ["Jenis Usaha", p.jenisUsaha], ["Produk Usaha", p.produkUsaha],
   ];
   return `<div class="rounded-2xl overflow-hidden border border-brand-200 shadow-sm bg-white">
-    <div class="bg-gradient-to-r from-brand-600 to-brand-500 px-4 py-2.5 flex items-center gap-2.5">
+    <div class="bg-gradient-to-r from-brand-600 to-brand-500 px-4 py-2.5 flex items-center gap-2.5 flex-wrap">
       <div class="w-8 h-8 rounded-md bg-white flex items-center justify-center p-1 flex-shrink-0">
         <img src="${LOGO_SRC}" class="w-full h-full object-contain" />
       </div>
@@ -233,7 +266,7 @@ function identityCardHTML(p, stage) {
     <div class="p-4 flex gap-4">
       <div class="w-20 sm:w-24 h-24 sm:h-28 rounded-lg overflow-hidden bg-stone-100 flex-shrink-0 border border-stone-200">${photo}</div>
       <div class="flex-1 min-w-0">
-        <table class="w-full text-xs sm:text-sm">
+        <table class="w-full text-xs sm:text-sm identity-table">
           ${rows.map(([label, val]) => `<tr>
             <td class="text-stone-400 align-top py-0.5 pr-2 whitespace-nowrap w-24 sm:w-28 font-medium">${label}</td>
             <td class="text-stone-400 align-top py-0.5 pr-1">:</td>
@@ -242,6 +275,10 @@ function identityCardHTML(p, stage) {
         </table>
       </div>
     </div>
+    ${independenceLevel !== undefined ? `<div class="px-4 pb-3 flex items-center gap-2">
+      <span class="text-[11px] uppercase tracking-wide text-stone-400 font-medium">Tingkat Kemandirian</span>
+      ${independenceBadge(independenceLevel)}
+    </div>` : ""}
     <div class="h-1.5 bg-gradient-to-r from-brand-600 via-brand-400 to-brand-600"></div>
   </div>`;
 }
@@ -337,8 +374,21 @@ let pendingPhotoBase64 = null;
 
 function root() { return document.getElementById("root"); }
 function render() {
+  const scrollY = window.scrollY;
+  const activeId = document.activeElement ? document.activeElement.id : null;
   root().innerHTML = viewHTML();
   drawChartIfNeeded();
+  if (state.scrollToHistory) {
+    state.scrollToHistory = false;
+    const el = document.getElementById("historySection");
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  } else {
+    window.scrollTo(0, scrollY);
+    if (activeId) {
+      const el = document.getElementById(activeId);
+      if (el && el !== document.activeElement) el.focus({ preventScroll: true });
+    }
+  }
 }
 
 function init() {
@@ -401,6 +451,7 @@ function submitIncome() {
   const catatan = state.noteOpen ? (document.getElementById("noteInput")?.value || "") : "";
   state.saving = true; state.formError = ""; render();
   addIncomeEntry(state.participant.nik, { tanggal: todayISO(), jumlah: val, catatan })
+    .then(() => { state.incomeJustSaved = true; state.scrollToHistory = true; setTimeout(() => { state.incomeJustSaved = false; render(); }, 3000); })
     .catch(() => { state.formError = "Gagal menyimpan. Periksa koneksi internet Anda."; })
     .finally(() => { state.saving = false; state.noteOpen = false; render(); });
 }
@@ -678,6 +729,7 @@ function historyRowsAdmin(items) {
 function participantHTML() {
   const p = state.participant, entries = state.entries, pl = state.povertyLine;
   const stage = getStage(entries, p, pl);
+  const independenceLevel = getIndependenceLevel(entries, p, pl);
   const trend = getTrend(entries);
   const income = lastIncome(entries);
   const sorted = sortedEntries(entries);
@@ -686,7 +738,7 @@ function participantHTML() {
   return `${header("Kartu Peserta Program")}
   <main class="max-w-md mx-auto px-5 py-6 pb-16">
 
-    <div class="mb-5">${identityCardHTML(p, stage)}</div>
+    <div class="mb-5">${identityCardHTML(p, stage, independenceLevel)}</div>
 
     <div class="bg-white rounded-2xl border border-stone-200 p-4 mb-5">
       ${stepTrack(stage)}
@@ -717,15 +769,16 @@ function participantHTML() {
         ${state.saving ? "Menyimpan…" : "Simpan Pendapatan"}
       </button>
       ${state.formError ? `<p class="text-rose-100 text-xs mt-2">${state.formError}</p>` : ""}
+      ${state.incomeJustSaved ? `<p class="text-white text-xs mt-2 flex items-center gap-1.5"><span class="w-3.5 h-3.5">${ICON.check}</span> Tersimpan! Lihat di Histori Pendapatan di bawah.</p>` : ""}
     </div>
 
     ${sorted.length > 0 ? `
     <div class="bg-white rounded-2xl border border-stone-200 p-5 mb-5">
       <h3 class="font-display font-semibold text-stone-900 mb-3">Grafik Pertumbuhan</h3>
-      <canvas id="incomeChart" height="160"></canvas>
+      <div class="chart-wrap"><canvas id="incomeChart"></canvas></div>
     </div>` : ""}
 
-    <div class="bg-white rounded-2xl border border-stone-200 p-5 mb-5">
+    <div id="historySection" class="bg-white rounded-2xl border border-stone-200 p-5 mb-5 scroll-mt-6">
       <h3 class="font-display font-semibold text-stone-900 mb-3">Histori Pendapatan</h3>
       ${historyRowsReadOnly(historyItems)}
     </div>
@@ -770,6 +823,7 @@ function adminHTML() {
   const rows = participants.map((p) => {
     const entries = incomeMap[p.nik] || [];
     const stage = getStage(entries, p, povertyLine);
+    const independenceLevel = getIndependenceLevel(entries, p, povertyLine);
     const trend = getTrend(entries);
     const hh = householdSize(p);
     const perCapita = lastIncome(entries) / hh;
@@ -789,6 +843,7 @@ function adminHTML() {
       <td class="py-2.5 pr-3 font-mono text-stone-800">${rupiah(lastIncome(entries))}</td>
       <td class="py-2.5 pr-3 font-mono text-stone-800">${rupiah(perCapita)}</td>
       <td class="py-2.5 pr-3">${stageBadge(stage, true)}</td>
+      <td class="py-2.5 pr-3">${independenceBadge(independenceLevel, true)}</td>
       <td class="py-2.5 pr-3">${trendPill(trend)}</td>
       <td class="py-2.5 pr-3">
         <div class="flex items-center gap-2">
@@ -846,7 +901,7 @@ function adminHTML() {
       <div class="overflow-x-auto"><table class="w-full text-sm">
         <thead><tr class="text-left text-[11px] uppercase text-stone-400 font-medium border-b border-stone-100">
           <th class="py-2 pr-3">Nama</th><th class="py-2 pr-3">Jenis Usaha</th><th class="py-2 pr-3">Pendapatan Terakhir</th>
-          <th class="py-2 pr-3">Per Kapita</th><th class="py-2 pr-3">Status</th><th class="py-2 pr-3">Tren</th><th class="py-2 pr-3"></th>
+          <th class="py-2 pr-3">Per Kapita</th><th class="py-2 pr-3">Status</th><th class="py-2 pr-3">Tingkat Kemandirian</th><th class="py-2 pr-3">Tren</th><th class="py-2 pr-3"></th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table></div>`}
@@ -861,6 +916,7 @@ function adminHTML() {
 function adminDetailHTML() {
   const p = state.participant, entries = state.incomeMap[p.nik] || [], pl = state.povertyLine;
   const stage = getStage(entries, p, pl);
+  const independenceLevel = getIndependenceLevel(entries, p, pl);
   const sorted = sortedEntries(entries);
   const historyItems = groupHistoryForDisplay(entries);
   return `${header("Detail Peserta")}
@@ -869,7 +925,7 @@ function adminDetailHTML() {
       <span class="w-4 h-4">${ICON.back}</span> Kembali ke dashboard
     </button>
 
-    <div class="mb-5">${identityCardHTML(p, stage)}</div>
+    <div class="mb-5">${identityCardHTML(p, stage, independenceLevel)}</div>
 
     <button onclick="copyParticipantLink('${p.nik}')" class="mb-5 inline-flex items-center gap-1.5 text-xs font-medium text-brand-700 hover:underline">
       <span class="w-3.5 h-3.5">${ICON.copy}</span> ${state.linkCopiedNik === p.nik ? "Tautan disalin!" : "Salin tautan kartu peserta ini"}
@@ -877,7 +933,7 @@ function adminDetailHTML() {
 
     ${sorted.length > 0 ? `<div class="bg-white rounded-2xl border border-stone-200 p-6 mb-5">
       <h3 class="font-display font-semibold text-stone-900 mb-3">Grafik Pertumbuhan</h3>
-      <canvas id="incomeChart" height="160"></canvas>
+      <div class="chart-wrap"><canvas id="incomeChart"></canvas></div>
     </div>` : ""}
 
     <div class="bg-white rounded-2xl border border-stone-200 p-6 mb-5">
@@ -1064,6 +1120,8 @@ function drawChartIfNeeded() {
       ],
     },
     options: {
+      responsive: true,
+      maintainAspectRatio: false,
       plugins: { legend: { labels: { font: { family: "Inter", size: 11 } } } },
       scales: {
         y: { ticks: { callback: (v) => (v / 1000).toFixed(0) + "k", font: { family: "JetBrains Mono", size: 10 } } },
