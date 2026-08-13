@@ -41,15 +41,13 @@
 
 <script>
 /* =====================================================================
-   1) FIREBASE SETUP — GANTI DENGAN KONFIGURASI PROYEK FIREBASE ANDA
+   1) FIREBASE SETUP — konfigurasi proyek "pp-keluar-gk" sudah disematkan.
    =====================================================================
-   Cara mendapatkan nilai ini:
-   1. Buka https://console.firebase.google.com → buat proyek baru (gratis).
-   2. Tambahkan "Web App" di pengaturan proyek → salin firebaseConfig di sini.
-   3. Aktifkan "Firestore Database" (mode production) di menu Build.
-   4. Aktifkan "Authentication" → Sign-in method → Email/Password.
-   5. Di tab Authentication → Users, tambahkan 1 akun untuk admin (email + password).
-   6. Di Firestore → Rules, tempel aturan yang ada di bagian PALING BAWAH file ini
+   Yang masih perlu dilakukan di console.firebase.google.com (proyek pp-keluar-gk):
+   1. Aktifkan "Firestore Database" (mode production) di menu Build, jika belum.
+   2. Aktifkan "Authentication" → Sign-in method → Email/Password.
+   3. Di tab Authentication → Users, tambahkan 1 akun untuk admin (email + password).
+   4. Di Firestore → Rules, tempel aturan yang ada di bagian PALING BAWAH file ini
       (lihat komentar FIRESTORE SECURITY RULES) lalu klik Publish.
    Aplikasi ini realtime: perubahan data (input pendapatan peserta, catatan
    admin, dll) langsung muncul di semua layar yang terbuka tanpa perlu refresh.
@@ -222,6 +220,12 @@ function identityCardHTML(p, stage) {
 function addIncomeEntry(nik, entry) {
   return db.collection("participants").doc(nik).collection("income").add(entry);
 }
+function updateIncomeEntry(nik, entryId, data) {
+  return db.collection("participants").doc(nik).collection("income").doc(entryId).update(data);
+}
+function deleteIncomeEntryDoc(nik, entryId) {
+  return db.collection("participants").doc(nik).collection("income").doc(entryId).delete();
+}
 function saveParticipantDoc(nik, data) {
   return db.collection("participants").doc(nik).set(data, { merge: true });
 }
@@ -292,6 +296,7 @@ let state = {
   loginError: "",
   linkCopiedNik: null,
   showInterventionForm: false,
+  editingIncome: null,
 };
 let chartRef = null;
 let pendingPhotoBase64 = null;
@@ -313,7 +318,6 @@ function init() {
       render();
     }));
     track(subscribeIncome(NIK_PARAM, (entries) => { state.entries = entries; if (state.view === "peserta") render(); }));
-    track(subscribeInterventions(NIK_PARAM, (list) => { state.interventions = list; if (state.view === "peserta") render(); }));
     track(subscribeSettings((s) => { state.povertyLine = s.povertyLine || 550458; if (state.view === "peserta") render(); }));
     return;
   }
@@ -467,6 +471,30 @@ function backToAdmin() {
   state.view = "admin"; state.showInterventionForm = false; render();
 }
 
+function openIncomeEdit(id) {
+  const entries = state.incomeMap[state.participant.nik] || [];
+  state.editingIncome = entries.find((e) => e.id === id) || null;
+  render();
+}
+function closeIncomeEdit() { state.editingIncome = null; render(); }
+function submitIncomeEdit(ev) {
+  ev.preventDefault();
+  const f = ev.target;
+  const data = {
+    tanggal: f.tanggal.value,
+    jumlah: Number(f.jumlah.value) || 0,
+    catatan: f.catatan.value.trim(),
+  };
+  if (!data.tanggal || data.jumlah < 0) return;
+  updateIncomeEntry(state.participant.nik, state.editingIncome.id, data).then(() => {
+    state.editingIncome = null; render();
+  });
+}
+function removeIncomeEntry(id) {
+  if (!confirm("Hapus data pendapatan pekan ini?")) return;
+  deleteIncomeEntryDoc(state.participant.nik, id);
+}
+
 function toggleInterventionForm() { state.showInterventionForm = !state.showInterventionForm; render(); }
 function submitIntervention(ev) {
   ev.preventDefault();
@@ -605,11 +633,6 @@ function participantHTML() {
           <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
         </div>`).join("")}
     </div>
-
-    <div class="bg-white rounded-2xl border border-stone-200 p-5">
-      <h3 class="font-display font-semibold text-stone-900 mb-3">Riwayat Intervensi Program</h3>
-      ${interventionTimelineHTML(state.interventions, false)}
-    </div>
   </main>`;
 }
 
@@ -739,7 +762,7 @@ function adminHTML() {
 }
 
 function adminDetailHTML() {
-  const p = state.participant, entries = state.entries, pl = state.povertyLine;
+  const p = state.participant, entries = state.incomeMap[p.nik] || [], pl = state.povertyLine;
   const stage = getStage(entries, p, pl);
   const sorted = sortedEntries(entries);
   return `${header("Detail Peserta")}
@@ -766,8 +789,16 @@ function adminDetailHTML() {
         <div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${i % 2 === 0 ? "bg-stone-50" : ""}">
           <div><div class="text-sm font-medium text-stone-800">Pekan ${sorted.length - i} — ${fmtDate(e.tanggal)}</div>
           ${e.catatan ? `<div class="text-xs text-stone-400">${e.catatan}</div>` : ""}</div>
-          <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
+          <div class="flex items-center gap-3">
+            <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
+            <button onclick="openIncomeEdit('${e.id}')" class="text-stone-400 hover:text-brand-700 w-3.5 h-3.5" title="Ubah">${ICON.edit}</button>
+            <button onclick="removeIncomeEntry('${e.id}')" class="text-stone-400 hover:text-rose-600 w-3.5 h-3.5" title="Hapus">${ICON.trash}</button>
+          </div>
         </div>`).join("")}
+      <p class="text-xs text-stone-400 mt-3 flex items-start gap-1.5">
+        <span class="w-3.5 h-3.5 mt-0.5 flex-shrink-0">${ICON.info}</span>
+        Admin dapat mengubah tanggal dan jumlah untuk memperbaiki data awal yang salah input.
+      </p>
     </div>
 
     <div class="bg-white rounded-2xl border border-stone-200 p-6">
@@ -804,7 +835,38 @@ function adminDetailHTML() {
       </form>` : ""}
       ${interventionTimelineHTML(state.interventions, true)}
     </div>
-  </main>`;
+  </main>
+  ${state.editingIncome ? incomeEditModal() : ""}`;
+}
+
+function incomeEditModal() {
+  const e = state.editingIncome;
+  return `<div class="fixed inset-0 bg-stone-900/40 flex items-center justify-center p-4 z-50" onclick="closeIncomeEdit()">
+    <div class="bg-white rounded-2xl p-6 max-w-sm w-full" onclick="event.stopPropagation()">
+      <div class="flex items-center justify-between mb-5">
+        <h3 class="font-display font-semibold text-lg text-stone-900">Ubah Data Pendapatan</h3>
+        <button onclick="closeIncomeEdit()" class="text-stone-400 hover:text-stone-700 w-5 h-5">${ICON.x}</button>
+      </div>
+      <form onsubmit="submitIncomeEdit(event)" class="space-y-3">
+        <div>
+          <label class="text-xs font-medium text-stone-500 block mb-1">Tanggal</label>
+          <input name="tanggal" type="date" value="${e.tanggal}" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-stone-500 block mb-1">Jumlah Pendapatan (Rp)</label>
+          <input name="jumlah" type="number" min="0" value="${e.jumlah}" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm font-mono" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-stone-500 block mb-1">Catatan (opsional)</label>
+          <input name="catatan" type="text" value="${e.catatan || ""}" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" onclick="closeIncomeEdit()" class="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Batal</button>
+          <button type="submit" class="px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg">Simpan Perubahan</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
 }
 
 function participantFormModal() {
@@ -879,7 +941,8 @@ function confirmDeleteModal() {
 function drawChartIfNeeded() {
   const canvas = document.getElementById("incomeChart");
   if (!canvas) return;
-  const sorted = sortedEntries(state.entries);
+  const src = state.view === "admin-detail" ? (state.incomeMap[state.participant.nik] || []) : state.entries;
+  const sorted = sortedEntries(src);
   const hh = householdSize(state.participant);
   if (chartRef) chartRef.destroy();
   chartRef = new Chart(canvas, {
