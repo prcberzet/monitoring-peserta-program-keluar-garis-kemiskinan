@@ -815,14 +815,30 @@ function interventionTimelineHTML(list, canManage) {
 function historyRowsReadOnly(items) {
   if (items.length === 0) return `<p class="text-sm text-stone-400">Belum ada data pendapatan.</p>`;
   return [...items].reverse().map((it, i) => {
-    const single = it.count === 1;
-    const sub = single
-      ? (it.entries[0].catatan || fmtDate(it.entries[0].tanggal))
-      : `Akumulasi ${it.count} entri${it.type === "weekly" ? " pekanan" : ""}`;
-    return `<div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${i % 2 === 0 ? "bg-stone-50" : ""}">
-      <div><div class="text-sm font-medium text-stone-800">${it.label}</div>
-      <div class="text-xs text-stone-400">${sub}</div></div>
-      <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(it.total)}</div>
+    const zebra = i % 2 === 0 ? "bg-stone-50" : "";
+    if (it.count === 1) {
+      const e = it.entries[0];
+      return `<div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${zebra}">
+        <div><div class="text-sm font-medium text-stone-800">${it.label} — ${fmtDate(e.tanggal)}</div>
+        ${e.catatan ? `<div class="text-xs text-stone-400">${e.catatan}</div>` : ""}</div>
+        <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
+      </div>`;
+    }
+    const expanded = !!state.expandedMonths[it.key];
+    return `<div class="rounded-lg ${zebra}">
+      <button onclick="toggleMonthExpand('${it.key}')" class="w-full flex items-center justify-between py-2.5 px-2 text-left">
+        <div><div class="text-sm font-medium text-stone-800">${it.label}</div>
+        <div class="text-xs text-stone-400">Akumulasi ${it.count} entri${it.type === "weekly" ? " pekanan" : ""} · ${expanded ? "sembunyikan rincian" : "lihat rincian"}</div></div>
+        <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(it.total)}</div>
+      </button>
+      ${expanded ? `<div class="pl-3 pr-2 pb-2 space-y-1">
+        ${[...it.entries].reverse().map((e) => `
+          <div class="flex items-center justify-between py-1.5 px-2 rounded-lg bg-white border border-stone-100">
+            <div><div class="text-xs font-medium text-stone-700">${fmtDate(e.tanggal)}</div>
+            ${e.catatan ? `<div class="text-[11px] text-stone-400">${e.catatan}</div>` : ""}</div>
+            <div class="font-mono text-xs font-semibold text-stone-800">${rupiah(e.jumlah)}</div>
+          </div>`).join("")}
+      </div>` : ""}
     </div>`;
   }).join("");
 }
@@ -957,11 +973,13 @@ function adminLoginHTML() {
 /* ---------- ADMIN DASHBOARD ---------- */
 function adminHTML() {
   const { participants, incomeMap, povertyLine } = state;
-  let mandiri = 0, belumData = 0, totalGrowth = 0, growthCount = 0;
+  let diatasGK = 0, totalGrowth = 0, growthCount = 0;
+  const tierCounts = { mandiri: 0, aman: 0, rentan: 0, sangat_rentan: 0 };
   participants.forEach((p) => {
     const entries = incomeMap[p.nik] || [];
-    if (getStage(entries, p, povertyLine) === "mandiri") mandiri++;
-    if (entries.length === 0) belumData++;
+    if (getPovertyStatus(entries, p, povertyLine) === "keluar") diatasGK++;
+    const lvl = getIndependenceLevel(entries, p, povertyLine);
+    if (lvl && Object.prototype.hasOwnProperty.call(tierCounts, lvl)) tierCounts[lvl]++;
     const t = getTrend(entries);
     if (t.pct !== null) { totalGrowth += t.pct; growthCount++; }
   });
@@ -1028,14 +1046,23 @@ function adminHTML() {
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
       ${[
         ["Total Peserta", participants.length, "text-stone-900"],
-        ["Sudah Mandiri", mandiri, "text-emerald-700"],
-        ["Belum Ada Data", belumData, "text-amber-700"],
+        ["Diatas Garis Kemiskinan", diatasGK, "text-emerald-700"],
         ["Rata-rata Pertumbuhan", avgGrowth === null ? "—" : `${avgGrowth > 0 ? "+" : ""}${avgGrowth.toFixed(0)}%`, avgGrowth > 0 ? "text-emerald-700" : "text-stone-900"],
       ].map(([label, val, cls]) => `
         <div class="bg-white rounded-2xl border border-stone-200 p-5">
           <div class="text-[11px] uppercase text-stone-400 font-medium mb-1">${label}</div>
           <div class="font-display font-bold text-2xl ${cls}">${val}</div>
         </div>`).join("")}
+      <div class="bg-white rounded-2xl border border-stone-200 p-5">
+        <div class="text-[11px] uppercase text-stone-400 font-medium mb-2">Tingkat Kemandirian</div>
+        <div class="space-y-1">
+          ${[["mandiri", "Mandiri"], ["aman", "Aman"], ["rentan", "Rentan"], ["sangat_rentan", "Sangat Rentan"]].map(([key, label]) => `
+            <div class="flex items-center justify-between text-xs">
+              <span class="inline-flex items-center gap-1.5 text-stone-600"><span class="w-1.5 h-1.5 rounded-full ${INDEPENDENCE_LEVELS[key].dot}"></span> ${label}</span>
+              <span class="font-mono font-semibold text-stone-900">${tierCounts[key]}</span>
+            </div>`).join("")}
+        </div>
+      </div>
     </div>
 
     <div class="bg-white rounded-2xl border border-stone-200 p-6">
