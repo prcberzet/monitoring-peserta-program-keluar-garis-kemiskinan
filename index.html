@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-<title>Langkah Mandiri — Monitoring Pendapatan Peserta</title>
+<title>Langkah Mandiri</title>
 
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
@@ -81,6 +81,13 @@ const LOGO_SRC = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAKAAAACECAYAAAAX
 /* =====================================================================
    2) HELPERS
    ===================================================================== */
+(function setFavicon() {
+  const link = document.createElement("link");
+  link.rel = "icon";
+  link.type = "image/png";
+  link.href = LOGO_SRC;
+  document.head.appendChild(link);
+})();
 const rupiah = (n) => "Rp " + Math.round(n || 0).toLocaleString("id-ID");
 /* Format titik ribuan saat mengetik nominal (mis. 350000 -> 350.000),
    dan parse balik ke angka murni saat data disimpan. */
@@ -1132,13 +1139,21 @@ function participantFormModal() {
         </div>
 
         <div class="grid grid-cols-2 gap-3">
-          ${fields.map(([key, label, type]) => `
+          ${fields.map(([key, label, type]) => {
+            if (ed && key === "nik") {
+              return `<div>
+                <label class="text-xs font-medium text-stone-500 block mb-1">${label} <span class="normal-case font-normal">(tidak dapat diubah)</span></label>
+                <div class="w-full bg-stone-100 text-stone-600 rounded-lg px-3 py-2 text-sm font-mono">${ed.nik}</div>
+              </div>`;
+            }
+            return `
             <div class="${key === "nama" ? "col-span-2" : ""}">
               <label class="text-xs font-medium text-stone-500 block mb-1">${label}</label>
-              <input name="${key}" type="${type}" ${ed && key === "nik" ? "disabled" : ""}
+              <input name="${key}" type="${type}"
                 value="${ed ? (ed[key] ?? "") : ""}"
-                class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm disabled:bg-stone-100" />
-            </div>`).join("")}
+                class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm" />
+            </div>`;
+          }).join("")}
           <div class="col-span-2">
             <label class="text-xs font-medium text-stone-500 block mb-1">Alamat</label>
             <textarea name="alamat" rows="2" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm">${ed ? (ed.alamat ?? "") : ""}</textarea>
