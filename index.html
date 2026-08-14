@@ -190,8 +190,17 @@ function monthLabel(ym) {
   const [y, m] = ym.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("id-ID", { month: "long", year: "numeric" });
 }
-/* Bulan berjalan (belum berakhir) ditampilkan per pekan (mentah);
-   bulan yang sudah berakhir diakumulasikan jadi satu total bulanan. */
+/* Ketentuan rentang pekan dalam sebulan (tetap, berdasarkan tanggal — bukan
+   urutan input): 1-7 = Pekan 1, 8-14 = Pekan 2, 15-21 = Pekan 3, 22-31 = Pekan 4. */
+function pekanOfMonth(day) {
+  if (day <= 7) return 1;
+  if (day <= 14) return 2;
+  if (day <= 21) return 3;
+  return 4;
+}
+/* Bulan berjalan (belum berakhir) dikelompokkan & diakumulasikan per pekan
+   sesuai rentang tanggal di atas; bulan yang sudah berakhir diakumulasikan
+   jadi satu total bulanan. */
 function groupHistoryForDisplay(entries) {
   const sorted = sortedEntries(entries);
   const curYM = currentYM();
@@ -203,13 +212,21 @@ function groupHistoryForDisplay(entries) {
   const items = [];
   Object.keys(groups).sort().forEach((ym) => {
     if (ym === curYM) {
-      groups[ym].forEach((e, idx) => {
-        items.push({ type: "weekly", label: `Pekan ${idx + 1}`, ym, entry: e });
+      const weekGroups = {};
+      groups[ym].forEach((e) => {
+        const day = Number((e.tanggal || "").slice(8, 10)) || 1;
+        const wk = pekanOfMonth(day);
+        (weekGroups[wk] = weekGroups[wk] || []).push(e);
+      });
+      Object.keys(weekGroups).sort((a, b) => Number(a) - Number(b)).forEach((wk) => {
+        const list = weekGroups[wk];
+        const total = list.reduce((s, e) => s + (Number(e.jumlah) || 0), 0);
+        items.push({ type: "weekly", label: `Pekan ${wk}`, ym, key: `${ym}-w${wk}`, total, count: list.length, entries: list });
       });
     } else {
       const list = groups[ym];
       const total = list.reduce((s, e) => s + (Number(e.jumlah) || 0), 0);
-      items.push({ type: "monthly", label: monthLabel(ym), ym, total, count: list.length, entries: list });
+      items.push({ type: "monthly", label: monthLabel(ym), ym, key: ym, total, count: list.length, entries: list });
     }
   });
   return items; // ascending (oldest first)
@@ -230,15 +247,16 @@ function referenceMonthlyIncome(entries) {
   }
   const weekly = items.filter((it) => it.type === "weekly");
   if (weekly.length === 0) return { total: 0, label: null, complete: false };
-  const total = weekly.reduce((s, it) => s + (Number(it.entry.jumlah) || 0), 0);
+  const total = weekly.reduce((s, it) => s + (Number(it.total) || 0), 0);
   return { total, label: monthLabel(currentYM()), complete: false };
 }
 function currentMonthAccumulated(entries) {
   const items = groupHistoryForDisplay(entries);
   const weekly = items.filter((it) => it.type === "weekly");
   if (weekly.length === 0) return null;
-  const total = weekly.reduce((s, it) => s + (Number(it.entry.jumlah) || 0), 0);
-  return { total, label: monthLabel(currentYM()), count: weekly.length };
+  const total = weekly.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  const count = weekly.reduce((s, it) => s + it.count, 0);
+  return { total, label: monthLabel(currentYM()), count };
 }
 function getStage(entries, p, povertyLine) {
   const s = sortedEntries(entries);
@@ -376,6 +394,28 @@ function deleteIncomeEntryDoc(nik, entryId) {
 }
 function saveParticipantDoc(nik, data) {
   return db.collection("participants").doc(nik).set(data, { merge: true });
+}
+/* NIK dipakai sebagai ID dokumen di Firestore, jadi mengubah NIK berarti
+   memindahkan seluruh dokumen (data peserta + histori pendapatan +
+   intervensi) ke dokumen baru, lalu menghapus yang lama. Link Kartu Peserta
+   yang memakai NIK lama otomatis tidak berlaku lagi setelah ini. */
+async function migrateParticipantNik(oldNik, newNik, data) {
+  const oldRef = db.collection("participants").doc(oldNik);
+  const newRef = db.collection("participants").doc(newNik);
+  const existing = await newRef.get();
+  if (existing.exists) { const err = new Error("NIK sudah dipakai peserta lain."); err.code = "NIK_EXISTS"; throw err; }
+  const [incomeSnap, interSnap] = await Promise.all([
+    oldRef.collection("income").get(),
+    oldRef.collection("interventions").get(),
+  ]);
+  const batch = db.batch();
+  batch.set(newRef, data);
+  incomeSnap.docs.forEach((d) => batch.set(newRef.collection("income").doc(d.id), d.data()));
+  interSnap.docs.forEach((d) => batch.set(newRef.collection("interventions").doc(d.id), d.data()));
+  incomeSnap.docs.forEach((d) => batch.delete(d.ref));
+  interSnap.docs.forEach((d) => batch.delete(d.ref));
+  batch.delete(oldRef);
+  return batch.commit();
 }
 async function deleteParticipantDoc(nik) {
   const ref = db.collection("participants").doc(nik);
@@ -592,7 +632,7 @@ function saveParticipantForm(ev) {
   const f = ev.target;
   const data = {
     nama: f.nama.value.trim(),
-    nik: (state.editing ? state.editing.nik : f.nik.value.trim()),
+    nik: f.nik.value.trim(),
     noTelpon: f.noTelpon.value.trim(),
     alamat: f.alamat.value.trim(),
     jumlahTanggungan: Number(f.jumlahTanggungan.value) || 0,
@@ -602,6 +642,20 @@ function saveParticipantForm(ev) {
   };
   if (!data.nama || !data.nik) { state.formError = "Nama dan NIK wajib diisi."; render(); return; }
   if (!/^\d+$/.test(data.nik)) { state.formError = "NIK hanya boleh berisi angka."; render(); return; }
+
+  const oldNik = state.editing ? state.editing.nik : null;
+  if (oldNik && oldNik !== data.nik) {
+    const ok = confirm(`Ubah NIK dari ${oldNik} menjadi ${data.nik}?\n\nSeluruh histori pendapatan & intervensi akan dipindahkan ke NIK baru, dan link Kartu Peserta lama (berisi NIK lama) tidak akan berlaku lagi.`);
+    if (!ok) return;
+    migrateParticipantNik(oldNik, data.nik, data).then(() => {
+      state.showForm = false; state.editing = null; pendingPhotoBase64 = null; render();
+    }).catch((err) => {
+      state.formError = err && err.code === "NIK_EXISTS" ? "NIK baru sudah dipakai peserta lain." : "Gagal mengubah NIK peserta.";
+      render();
+    });
+    return;
+  }
+
   saveParticipantDoc(data.nik, data).then(() => {
     state.showForm = false; state.editing = null; pendingPhotoBase64 = null; render();
   }).catch(() => { state.formError = "Gagal menyimpan data peserta."; render(); });
@@ -761,17 +815,13 @@ function interventionTimelineHTML(list, canManage) {
 function historyRowsReadOnly(items) {
   if (items.length === 0) return `<p class="text-sm text-stone-400">Belum ada data pendapatan.</p>`;
   return [...items].reverse().map((it, i) => {
-    if (it.type === "weekly") {
-      const e = it.entry;
-      return `<div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${i % 2 === 0 ? "bg-stone-50" : ""}">
-        <div><div class="text-sm font-medium text-stone-800">${it.label} — ${fmtDate(e.tanggal)}</div>
-        ${e.catatan ? `<div class="text-xs text-stone-400">${e.catatan}</div>` : ""}</div>
-        <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(e.jumlah)}</div>
-      </div>`;
-    }
+    const single = it.count === 1;
+    const sub = single
+      ? (it.entries[0].catatan || fmtDate(it.entries[0].tanggal))
+      : `Akumulasi ${it.count} entri${it.type === "weekly" ? " pekanan" : ""}`;
     return `<div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${i % 2 === 0 ? "bg-stone-50" : ""}">
       <div><div class="text-sm font-medium text-stone-800">${it.label}</div>
-      <div class="text-xs text-stone-400">Akumulasi ${it.count} entri pekanan</div></div>
+      <div class="text-xs text-stone-400">${sub}</div></div>
       <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(it.total)}</div>
     </div>`;
   }).join("");
@@ -781,8 +831,8 @@ function historyRowsAdmin(items) {
   if (items.length === 0) return `<p class="text-sm text-stone-400">Belum ada data.</p>`;
   return [...items].reverse().map((it, i) => {
     const zebra = i % 2 === 0 ? "bg-stone-50" : "";
-    if (it.type === "weekly") {
-      const e = it.entry;
+    if (it.count === 1) {
+      const e = it.entries[0];
       return `<div class="flex items-center justify-between py-2.5 px-2 rounded-lg ${zebra}">
         <div><div class="text-sm font-medium text-stone-800">${it.label} — ${fmtDate(e.tanggal)}</div>
         ${e.catatan ? `<div class="text-xs text-stone-400">${e.catatan}</div>` : ""}</div>
@@ -793,11 +843,11 @@ function historyRowsAdmin(items) {
         </div>
       </div>`;
     }
-    const expanded = !!state.expandedMonths[it.ym];
+    const expanded = !!state.expandedMonths[it.key];
     return `<div class="rounded-lg ${zebra}">
-      <button onclick="toggleMonthExpand('${it.ym}')" class="w-full flex items-center justify-between py-2.5 px-2 text-left">
+      <button onclick="toggleMonthExpand('${it.key}')" class="w-full flex items-center justify-between py-2.5 px-2 text-left">
         <div><div class="text-sm font-medium text-stone-800">${it.label}</div>
-        <div class="text-xs text-stone-400">Akumulasi ${it.count} entri pekanan · ${expanded ? "sembunyikan rincian" : "lihat rincian"}</div></div>
+        <div class="text-xs text-stone-400">Akumulasi ${it.count} entri${it.type === "weekly" ? " pekanan" : ""} · ${expanded ? "sembunyikan rincian" : "lihat rincian"}</div></div>
         <div class="font-mono font-semibold text-stone-900 text-sm">${rupiah(it.total)}</div>
       </button>
       ${expanded ? `<div class="pl-3 pr-2 pb-2 space-y-1">
@@ -1142,8 +1192,9 @@ function participantFormModal() {
           ${fields.map(([key, label, type]) => {
             if (ed && key === "nik") {
               return `<div>
-                <label class="text-xs font-medium text-stone-500 block mb-1">${label} <span class="normal-case font-normal">(tidak dapat diubah)</span></label>
-                <div class="w-full bg-stone-100 text-stone-600 rounded-lg px-3 py-2 text-sm font-mono">${ed.nik}</div>
+                <label class="text-xs font-medium text-stone-500 block mb-1">${label}</label>
+                <input name="nik" type="text" inputmode="numeric" value="${ed.nik}" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm font-mono" />
+                <p class="text-[10px] text-amber-600 mt-1">Mengubah NIK akan memindahkan seluruh histori & membuat link Kartu Peserta lama tidak berlaku lagi.</p>
               </div>`;
             }
             return `
@@ -1223,7 +1274,7 @@ function drawChartIfNeeded() {
     data: {
       labels: items.map((it) => it.label),
       datasets: [
-        { label: "Pendapatan", data: items.map((it) => it.type === "weekly" ? (Number(it.entry.jumlah) || 0) : it.total), borderColor: "#DD5623", backgroundColor: "#DD5623", tension: 0.3, pointRadius: 3 },
+        { label: "Pendapatan", data: items.map((it) => it.total), borderColor: "#DD5623", backgroundColor: "#DD5623", tension: 0.3, pointRadius: 3 },
         { label: `Garis Kemiskinan x Tanggungan (${rupiah(povertyThreshold)})`, data: items.map(() => povertyThreshold), borderColor: "#dc2626", borderDash: [4, 4], pointRadius: 0 },
       ],
     },
