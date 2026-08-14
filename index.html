@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <title>Langkah Mandiri — Monitoring Pendapatan Peserta</title>
 
 <script src="https://cdn.tailwindcss.com"></script>
@@ -103,6 +103,13 @@ const fmtDate = (iso) => new Date(iso).toLocaleDateString("id-ID", { day: "2-dig
 function initials(nama) {
   return (nama || "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 }
+function toWaNumber(phone) {
+  let d = String(phone || "").replace(/\D/g, "");
+  if (d.startsWith("0")) d = "62" + d.slice(1);
+  else if (d.startsWith("62")) { /* sudah format internasional */ }
+  else if (d) d = "62" + d;
+  return d;
+}
 
 const STAGES = {
   baru: { label: "Baru Bergabung", step: 0, bg: "bg-stone-200", text: "text-stone-700", bar: "bg-stone-400" },
@@ -125,7 +132,7 @@ const INDEPENDENCE_LEVELS = {
 function getIndependenceLevel(entries, p, povertyLine) {
   if (!entries || entries.length === 0) return null;
   const hh = householdSize(p);
-  const perCapita = lastIncome(entries) / hh;
+  const perCapita = referenceMonthlyIncome(entries).total / hh;
   const ratio = povertyLine > 0 ? perCapita / povertyLine : 0;
   if (ratio >= 3) return "mandiri";
   if (ratio >= 2) return "aman";
@@ -147,7 +154,7 @@ function getPovertyStatus(entries, p, povertyLine) {
   if (!entries || entries.length === 0) return null;
   const hh = householdSize(p);
   const threshold = povertyLine * hh;
-  return lastIncome(entries) >= threshold ? "keluar" : "menuju";
+  return referenceMonthlyIncome(entries).total >= threshold ? "keluar" : "menuju";
 }
 const POVERTY_STATUS_META = {
   menuju: { label: "Menuju Keluar GK", bg: "bg-amber-100", text: "text-amber-800", dot: "bg-amber-500" },
@@ -204,6 +211,27 @@ function householdSize(p) { return (Number(p.jumlahTanggungan) || 0) + 1; }
 function lastIncome(entries) {
   const s = sortedEntries(entries);
   return s.length ? Number(s[s.length - 1].jumlah) || 0 : 0;
+}
+/* Acuan "Pendapatan Terakhir": total akumulasi Bulan Terakhir yang sudah
+   selesai (bukan cuma entri terakhir). Kalau peserta baru mulai dan belum
+   ada satu bulan pun yang selesai, dipakai akumulasi bulan berjalan sebagai
+   acuan sementara. */
+function referenceMonthlyIncome(entries) {
+  const items = groupHistoryForDisplay(entries);
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i].type === "monthly") return { total: items[i].total, label: items[i].label, complete: true };
+  }
+  const weekly = items.filter((it) => it.type === "weekly");
+  if (weekly.length === 0) return { total: 0, label: null, complete: false };
+  const total = weekly.reduce((s, it) => s + (Number(it.entry.jumlah) || 0), 0);
+  return { total, label: monthLabel(currentYM()), complete: false };
+}
+function currentMonthAccumulated(entries) {
+  const items = groupHistoryForDisplay(entries);
+  const weekly = items.filter((it) => it.type === "weekly");
+  if (weekly.length === 0) return null;
+  const total = weekly.reduce((s, it) => s + (Number(it.entry.jumlah) || 0), 0);
+  return { total, label: monthLabel(currentYM()), count: weekly.length };
 }
 function getStage(entries, p, povertyLine) {
   const s = sortedEntries(entries);
@@ -289,9 +317,11 @@ function identityCardHTML(p, stage, independenceLevel, povertyStatus) {
   const photo = p.fotoBase64
     ? `<img src="${p.fotoBase64}" class="w-full h-full object-cover" />`
     : `<div class="w-full h-full flex items-center justify-center bg-brand-100 text-brand-700 font-display font-bold text-2xl">${initials(p.nama)}</div>`;
+  const waHref = p.noTelpon ? `https://wa.me/${toWaNumber(p.noTelpon)}` : null;
   const rows = [
     ["NIK", p.nik], ["Nama", p.nama], ["Alamat", p.alamat],
-    ["No. Telp", p.noTelpon], ["Tanggungan", `${p.jumlahTanggungan || 0} orang`],
+    ["No. Telp", waHref ? `<a href="${waHref}" target="_blank" rel="noopener" class="text-brand-700 underline underline-offset-2">${p.noTelpon}</a>` : (p.noTelpon || "-")],
+    ["Tanggungan", `${p.jumlahTanggungan || 0} orang`],
     ["Jenis Usaha", p.jenisUsaha], ["Produk Usaha", p.produkUsaha],
   ];
   return `<div class="rounded-2xl overflow-hidden border border-brand-200 shadow-sm bg-white">
@@ -303,7 +333,7 @@ function identityCardHTML(p, stage, independenceLevel, povertyStatus) {
         <div class="text-[9px] uppercase tracking-wider opacity-90">Rumah Zakat · Langkah Mandiri</div>
         <div class="text-xs font-bold tracking-wide font-display">KARTU PESERTA PROGRAM</div>
       </div>
-      ${stage ? `<div class="ml-auto flex-shrink-0">${stageBadge(stage, true)}</div>` : ""}
+      ${povertyStatus !== undefined ? `<div class="ml-auto flex-shrink-0">${povertyStatusBadge(povertyStatus, true)}</div>` : ""}
     </div>
     <div class="p-3 sm:p-4 flex gap-3 sm:gap-4">
       <div class="w-16 h-20 sm:w-24 sm:h-28 rounded-lg overflow-hidden bg-stone-100 flex-shrink-0 border border-stone-200">${photo}</div>
@@ -320,10 +350,6 @@ function identityCardHTML(p, stage, independenceLevel, povertyStatus) {
     ${independenceLevel !== undefined ? `<div class="px-4 pb-3 flex items-center gap-2 flex-wrap">
       <span class="text-[11px] uppercase tracking-wide text-stone-400 font-medium">Tingkat Kemandirian</span>
       ${independenceBadge(independenceLevel)}
-    </div>` : ""}
-    ${povertyStatus !== undefined ? `<div class="px-4 pb-3 flex items-center gap-2 flex-wrap">
-      <span class="text-[11px] uppercase tracking-wide text-stone-400 font-medium">Status</span>
-      ${povertyStatusBadge(povertyStatus)}
     </div>` : ""}
     <div class="h-1.5 bg-gradient-to-r from-brand-600 via-brand-400 to-brand-600"></div>
   </div>`;
@@ -790,7 +816,8 @@ function participantHTML() {
   const independenceLevel = getIndependenceLevel(entries, p, pl);
   const povertyStatus = getPovertyStatus(entries, p, pl);
   const trend = getTrend(entries);
-  const income = lastIncome(entries);
+  const monthRef = referenceMonthlyIncome(entries);
+  const curMonthAcc = currentMonthAccumulated(entries);
   const sorted = sortedEntries(entries);
   const historyItems = groupHistoryForDisplay(entries);
 
@@ -808,7 +835,9 @@ function participantHTML() {
     <div class="grid grid-cols-2 gap-3 mb-5">
       <div class="rounded-xl bg-stone-100 p-4">
         <div class="text-[11px] uppercase text-stone-500 font-medium mb-1">Pendapatan Terakhir</div>
-        <div class="font-mono font-bold text-lg text-stone-900">${rupiah(income)}</div>
+        <div class="font-mono font-bold text-lg text-stone-900">${rupiah(monthRef.total)}</div>
+        ${monthRef.label ? `<div class="text-[10px] text-stone-400 mt-0.5">${monthRef.label}</div>` : `<div class="text-[10px] text-stone-400 mt-0.5">Belum ada bulan penuh</div>`}
+        ${monthRef.complete && curMonthAcc ? `<div class="text-[10px] text-stone-400 mt-1 pt-1 border-t border-stone-200">Akumulasi ${curMonthAcc.label} (berjalan): ${rupiah(curMonthAcc.total)}</div>` : ""}
       </div>
       <div class="rounded-xl bg-stone-100 p-4">
         <div class="text-[11px] uppercase text-stone-500 font-medium mb-1">Tren</div>
@@ -887,7 +916,8 @@ function adminHTML() {
     const independenceLevel = getIndependenceLevel(entries, p, povertyLine);
     const trend = getTrend(entries);
     const hh = householdSize(p);
-    const perCapita = lastIncome(entries) / hh;
+    const monthRef = referenceMonthlyIncome(entries);
+    const perCapita = monthRef.total / hh;
     return `<tr class="border-b border-stone-50 hover:bg-stone-50/70">
       <td class="py-2.5 pr-3">
         <div class="flex items-center gap-2.5">
@@ -901,7 +931,7 @@ function adminHTML() {
         </div>
       </td>
       <td class="py-2.5 pr-3 text-stone-600">${p.jenisUsaha || "-"}</td>
-      <td class="py-2.5 pr-3 font-mono text-stone-800">${rupiah(lastIncome(entries))}</td>
+      <td class="py-2.5 pr-3 font-mono text-stone-800">${rupiah(monthRef.total)}</td>
       <td class="py-2.5 pr-3 font-mono text-stone-800">${rupiah(perCapita)}</td>
       <td class="py-2.5 pr-3">${stageBadge(stage, true)}</td>
       <td class="py-2.5 pr-3">${independenceBadge(independenceLevel, true)}</td>
