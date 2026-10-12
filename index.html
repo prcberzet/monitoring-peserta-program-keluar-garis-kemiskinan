@@ -23,6 +23,7 @@
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 
 <!-- Firebase (compat SDK, no build step needed) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
@@ -398,6 +399,49 @@ function saveParticipantDoc(nik, data) {
   return db.collection("participants").doc(nik).set(data, { merge: true });
 }
 
+/* ---------- DAFTAR CABANG RESMI ---------- */
+const CABANG_LIST = [
+  "RZ - Pusat",
+  "RZ - Aceh",
+  "RZ - Balikpapan",
+  "RZ - Bandar Lampung",
+  "RZ - Bandung - Turangga",
+  "RZ - Banjarmasin",
+  "RZ - Batam",
+  "RZ - Bekasi",
+  "RZ - Bogor",
+  "RZ - Cilegon",
+  "RZ - Cimahi",
+  "RZ - Cirebon",
+  "RZ - Depok",
+  "RZ - Jakarta - Bintaro",
+  "RZ - Jakarta - Matraman",
+  "RZ - Jayapura",
+  "RZ - Kediri",
+  "RZ - Makassar",
+  "RZ - Malang",
+  "RZ - Medan",
+  "RZ - Padang",
+  "RZ - Palembang",
+  "RZ - Pekanbaru",
+  "RZ - Pontianak",
+  "RZ - Samarinda",
+  "RZ - Semarang",
+  "RZ - Solo",
+  "RZ - Surabaya",
+  "RZ - Tangerang",
+  "RZ - Yogyakarta"
+];
+// pembanding toleran (huruf besar/kecil, spasi, jenis tanda hubung) -> nama resmi
+const normCabang = (v) => String(v || "").toLowerCase().replace(/[‐-―−]/g, "-").replace(/\s*-\s*/g, " - ").replace(/\s+/g, " ").trim();
+const CABANG_BY_NORM = new Map(CABANG_LIST.map((c) => [normCabang(c), c]));
+/* "" = kosong (boleh), null = tidak ada di daftar, selain itu nama resmi cabang */
+function resolveCabang(v) {
+  const n = normCabang(v);
+  if (!n) return "";
+  return CABANG_BY_NORM.get(n) || null;
+}
+
 /* Baca nominal rupiah dari sel Excel: angka biasa, "1.500.000", "Rp 750.000", atau "1500000". Kosong -> null. */
 function parseRupiahCell(raw) {
   if (typeof raw === "number") return Number.isFinite(raw) && raw >= 0 ? { value: Math.round(raw) } : { error: true };
@@ -436,42 +480,84 @@ const IMPORT_COLUMNS = [
   { key: "alamat", header: "Alamat", aliases: ["alamat"], width: 44 },
 ];
 
-function downloadParticipantTemplate() {
-  if (typeof XLSX === "undefined") { alert("Library Excel belum termuat. Periksa koneksi internet lalu coba lagi."); return; }
-  const wb = XLSX.utils.book_new();
+/* Template dibuat dengan ExcelJS agar kolom Cabang punya dropdown (data validation) yang sungguhan di Excel.
+   Daftar cabang ditaruh di sheet "Cabang" karena batas dropdown berisi teks langsung hanya 255 karakter. */
+function buildParticipantTemplate(ExcelLib) {
+  const wb = new ExcelLib.Workbook();
+  const ws = wb.addWorksheet("Data Peserta", { views: [{ state: "frozen", ySplit: 1 }] });
+  ws.columns = IMPORT_COLUMNS.map((c) => ({ header: c.header, key: c.key, width: c.width }));
+  const head = ws.getRow(1);
+  head.font = { bold: true, color: { argb: "FFFFFFFF" } };
+  head.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDD5623" } };
+  head.alignment = { vertical: "middle", wrapText: true };
+  head.height = 22;
 
-  // Sheet 1: Data Peserta (header saja; kolom NIK & No. Telpon dipaksa format Teks)
-  const ws = XLSX.utils.aoa_to_sheet([IMPORT_COLUMNS.map((c) => c.header)]);
-  const textCols = [1, 2]; // NIK, No. Telpon
-  for (let r = 1; r <= 500; r++) {
-    textCols.forEach((c) => { ws[XLSX.utils.encode_cell({ r, c })] = { t: "s", v: "", z: "@" }; });
+  const colOf = (key) => IMPORT_COLUMNS.findIndex((c) => c.key === key) + 1;
+  const LAST_ROW = 501;
+  for (let r = 2; r <= LAST_ROW; r++) {
+    ws.getCell(r, colOf("nik")).numFmt = "@";        // NIK & telpon harus Teks (cegah digit terpotong / nol hilang)
+    ws.getCell(r, colOf("noTelpon")).numFmt = "@";
+    ws.getCell(r, colOf("baseline")).numFmt = "#,##0";
   }
-  ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 500, c: IMPORT_COLUMNS.length - 1 } });
-  ws["!cols"] = IMPORT_COLUMNS.map((c) => ({ wch: c.width }));
-  XLSX.utils.book_append_sheet(wb, ws, "Data Peserta");
+  // satu aturan dropdown untuk seluruh rentang kolom Cabang (bukan per sel, agar tidak ada rentang validasi yang tumpang tindih)
+  const cabangColLetter = String.fromCharCode(64 + colOf("cabang"));
+  ws.dataValidations.add(`${cabangColLetter}2:${cabangColLetter}${LAST_ROW}`, {
+    type: "list",
+    allowBlank: true,
+    formulae: [`Cabang!$A$2:$A$${CABANG_LIST.length + 1}`],
+    showErrorMessage: true,
+    errorStyle: "stop",
+    errorTitle: "Cabang tidak valid",
+    error: "Pilih cabang dari daftar dropdown.",
+    showInputMessage: true,
+    promptTitle: "Cabang",
+    prompt: "Pilih dari dropdown",
+  });
 
-  // Sheet 2: Petunjuk + contoh pengisian
-  const guide = [
-    ["PETUNJUK PENGISIAN — Template Peserta Program Langkah Mandiri"],
-    [""],
-    ["1. Isi data peserta pada sheet \"Data Peserta\", satu peserta per baris, mulai baris ke-2. Jangan ubah/hapus baris judul kolom."],
-    ["2. Kolom bertanda * (Nama Lengkap, NIK) wajib diisi."],
-    ["3. NIK hanya angka, tanpa spasi/titik/tanda baca (umumnya 16 digit). Kolom NIK sudah berformat Teks — jangan diubah ke Angka, karena Excel akan memotong digit NIK."],
-    ["4. Jumlah Tanggungan diisi angka bulat (mis. 3). Jika kosong dianggap 0."],
-    ["5. NIK harus unik. NIK yang sudah terdaftar di aplikasi akan dilewati (atau diperbarui jika opsi \"Perbarui\" dicentang saat upload)."],
-    ["6. Cabang dan Departemen dipakai sebagai pembeda & filter di dashboard. Tulis dengan ejaan yang konsisten (mis. selalu \"Social Service\", bukan \"social service\" atau \"SS\") agar filter tidak terpecah."],
-    ["7. Baseline = pendapatan terakhir peserta SEBELUM menerima intervensi bantuan (rupiah per bulan). Isi angka saja (mis. 600000 atau 600.000), tanpa \"Rp\". Boleh dikosongkan dulu dan diisi menyusul."],
-    ["8. Foto peserta tidak diunggah lewat Excel — tambahkan lewat tombol Ubah pada peserta setelah impor."],
-    [""],
-    ["CONTOH PENGISIAN (jangan disalin bersama baris ini):"],
-    IMPORT_COLUMNS.map((c) => c.header),
-    ["Saepudin", "3203200709780003", "085314571889", "Cianjur", "Social Service", 1, "Konveksi", "Topi", 600000, "Kp. Sirnagalih RT003 RW004 Desa Padasuka Kec. Cibinong Kab. Cianjur"],
+  const guide = wb.addWorksheet("Petunjuk");
+  guide.columns = IMPORT_COLUMNS.map((c) => ({ width: c.width }));
+  const lines = [
+    "PETUNJUK PENGISIAN — Template Peserta Program Langkah Mandiri",
+    "",
+    "1. Isi data peserta pada sheet \"Data Peserta\", satu peserta per baris, mulai baris ke-2. Jangan ubah/hapus baris judul kolom.",
+    "2. Kolom bertanda * (Nama Lengkap, NIK) wajib diisi.",
+    "3. NIK hanya angka, tanpa spasi/titik/tanda baca (umumnya 16 digit). Kolom NIK sudah berformat Teks — jangan diubah ke Angka, karena Excel akan memotong digit NIK.",
+    "4. Jumlah Tanggungan diisi angka bulat (mis. 3). Jika kosong dianggap 0.",
+    "5. NIK harus unik. NIK yang sudah terdaftar di aplikasi akan dilewati (atau diperbarui jika opsi \"Perbarui\" dicentang saat upload).",
+    "6. Cabang WAJIB dipilih dari dropdown (30 cabang resmi, daftar ada di sheet \"Cabang\"); isian di luar daftar akan ditolak saat upload. Departemen ditulis dengan ejaan konsisten (mis. selalu \"Social Service\") agar filter tidak terpecah.",
+    "7. Baseline = pendapatan terakhir peserta SEBELUM menerima intervensi bantuan (rupiah per bulan). Isi angka saja (mis. 600000 atau 600.000), tanpa \"Rp\". Boleh dikosongkan dulu dan diisi menyusul.",
+    "8. Foto peserta tidak diunggah lewat Excel — tambahkan lewat tombol Ubah pada peserta setelah impor.",
+    "",
+    "CONTOH PENGISIAN (jangan disalin bersama baris ini):",
   ];
-  const wsGuide = XLSX.utils.aoa_to_sheet(guide);
-  wsGuide["!cols"] = IMPORT_COLUMNS.map((c) => ({ wch: c.width }));
-  XLSX.utils.book_append_sheet(wb, wsGuide, "Petunjuk");
+  lines.forEach((t) => guide.addRow([t]));
+  guide.getRow(1).font = { bold: true };
+  guide.getRow(lines.length).font = { bold: true };
+  const sampleHead = guide.addRow(IMPORT_COLUMNS.map((c) => c.header));
+  sampleHead.font = { bold: true };
+  guide.addRow(["Saepudin", "3203200709780003", "085314571889", "RZ - Bandung - Turangga", "Social Service", 1, "Konveksi", "Topi", 600000, "Kp. Sirnagalih RT003 RW004 Desa Padasuka Kec. Cibinong Kab. Cianjur"]);
 
-  XLSX.writeFile(wb, "Template_Peserta_Program_Langkah_Mandiri.xlsx");
+  const cab = wb.addWorksheet("Cabang");
+  cab.columns = [{ header: "Daftar Cabang", key: "n", width: 32 }];
+  cab.getRow(1).font = { bold: true };
+  CABANG_LIST.forEach((c) => cab.addRow([c]));
+  return wb;
+}
+
+async function downloadParticipantTemplate() {
+  if (typeof ExcelJS === "undefined") { alert("Library Excel belum termuat. Periksa koneksi internet lalu coba lagi."); return; }
+  try {
+    const buf = await buildParticipantTemplate(ExcelJS).xlsx.writeBuffer();
+    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "Template_Peserta_Program_Langkah_Mandiri.xlsx";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  } catch (err) {
+    console.error("[Langkah Mandiri] Gagal membuat template:", err);
+    alert("Gagal membuat template Excel.");
+  }
 }
 
 const escHtml = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -526,6 +612,10 @@ function parseParticipantSheet(arrayBuffer, existingNiks) {
       else tanggungan = n;
     }
 
+    const cabangRaw = String(cell(raw, "cabang")).trim();
+    const cabangRes = resolveCabang(cabangRaw);
+    if (cabangRes === null) errors.push(`Cabang "${cabangRaw}" tidak ada di daftar — pilih dari dropdown di template`);
+
     const bl = parseRupiahCell(cell(raw, "baseline"));
     if (bl.error) errors.push("Baseline harus berupa angka rupiah ≥ 0 (mis. 600000)");
     const baseline = bl.error ? null : bl.value;
@@ -540,7 +630,7 @@ function parseParticipantSheet(arrayBuffer, existingNiks) {
       nik,
       noTelpon: String(cell(raw, "noTelpon")).trim(),
       alamat: String(cell(raw, "alamat")).trim(),
-      cabang: String(cell(raw, "cabang")).trim(),
+      cabang: cabangRes || "",
       departemen: String(cell(raw, "departemen")).trim(),
       jumlahTanggungan: tanggungan,
       jenisUsaha: String(cell(raw, "jenisUsaha")).trim(),
@@ -857,6 +947,7 @@ function saveParticipantForm(ev) {
     fotoBase64: pendingPhotoBase64 || null,
   };
   if (!data.nama || !data.nik) { state.formError = "Nama dan NIK wajib diisi."; render(); return; }
+  if (data.cabang && resolveCabang(data.cabang) === null) { state.formError = "Cabang tidak valid — pilih dari daftar."; render(); return; }
   if (!/^\d+$/.test(data.nik)) { state.formError = "NIK hanya boleh berisi angka."; render(); return; }
 
   const oldNik = state.editing ? state.editing.nik : null;
@@ -1189,10 +1280,14 @@ function adminLoginHTML() {
 /* ---------- ADMIN DASHBOARD ---------- */
 function adminHTML() {
   const { participants: allParticipants, incomeMap, povertyLine } = state;
-  const cabangOpts = distinctValues(allParticipants, "cabang");
+  const presentCabang = new Set(allParticipants.map((p) => String(p.cabang || "").trim()).filter(Boolean));
+  const cabangOpts = [
+    ...CABANG_LIST.filter((c) => presentCabang.has(c)).map((c) => ({ value: c, label: c })),
+    ...[...presentCabang].filter((c) => !CABANG_LIST.includes(c)).sort().map((c) => ({ value: c, label: `⚠ ${c} (di luar daftar)` })),
+  ];
   const deptOpts = distinctValues(allParticipants, "departemen");
   // filter yang nilainya sudah tidak ada lagi (mis. peserta terakhir dihapus) dikembalikan ke "Semua"
-  if (state.filterCabang && state.filterCabang !== FILTER_NONE && !cabangOpts.includes(state.filterCabang)) state.filterCabang = "";
+  if (state.filterCabang && state.filterCabang !== FILTER_NONE && !cabangOpts.some((o) => o.value === state.filterCabang)) state.filterCabang = "";
   if (state.filterDepartemen && state.filterDepartemen !== FILTER_NONE && !deptOpts.includes(state.filterDepartemen)) state.filterDepartemen = "";
   const participants = allParticipants.filter((p) => matchFilter(p.cabang, state.filterCabang) && matchFilter(p.departemen, state.filterDepartemen));
   const isFiltered = !!(state.filterCabang || state.filterDepartemen);
@@ -1276,7 +1371,7 @@ function adminHTML() {
         <label class="text-[11px] text-stone-500 font-medium block mb-1">Cabang</label>
         <select id="filterCabang" onchange="setAdminFilter('cabang', this.value)" class="border border-stone-300 rounded-lg px-3 py-1.5 text-sm bg-white min-w-[9rem]">
           <option value="">Semua cabang</option>
-          ${cabangOpts.map((v) => `<option value="${escHtml(v)}" ${state.filterCabang === v ? "selected" : ""}>${escHtml(v)}</option>`).join("")}
+          ${cabangOpts.map((o) => `<option value="${escHtml(o.value)}" ${state.filterCabang === o.value ? "selected" : ""}>${escHtml(o.label)}</option>`).join("")}
           <option value="${FILTER_NONE}" ${state.filterCabang === FILTER_NONE ? "selected" : ""}>(Belum diisi)</option>
         </select>
       </div>
@@ -1528,7 +1623,6 @@ function participantFormModal() {
         <button onclick="closeParticipantForm()" class="text-stone-400 hover:text-stone-700 w-5 h-5">${ICON.x}</button>
       </div>
       <form onsubmit="saveParticipantForm(event)" class="space-y-3">
-        <datalist id="dl-cabang">${distinctValues(state.participants, "cabang").map((v) => `<option value="${escHtml(v)}"></option>`).join("")}</datalist>
         <datalist id="dl-departemen">${distinctValues(state.participants, "departemen").map((v) => `<option value="${escHtml(v)}"></option>`).join("")}</datalist>
 
         <div class="flex items-center gap-4">
@@ -1550,6 +1644,18 @@ function participantFormModal() {
                 <label class="text-xs font-medium text-stone-500 block mb-1">${label}</label>
                 <input name="nik" type="text" inputmode="numeric" value="${ed.nik}" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm font-mono" />
                 <p class="text-[10px] text-amber-600 mt-1">Mengubah NIK akan memindahkan seluruh histori & membuat link Kartu Peserta lama tidak berlaku lagi.</p>
+              </div>`;
+            }
+            if (key === "cabang") {
+              const cur = ed ? resolveCabang(ed.cabang) : "";
+              const legacy = ed && String(ed.cabang || "").trim() && cur === null;
+              return `<div>
+                <label class="text-xs font-medium text-stone-500 block mb-1">${label}</label>
+                <select name="cabang" class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm bg-white">
+                  <option value="">— Pilih cabang —</option>
+                  ${CABANG_LIST.map((c) => `<option value="${escHtml(c)}" ${cur === c ? "selected" : ""}>${escHtml(c)}</option>`).join("")}
+                </select>
+                ${legacy ? `<p class="text-[10px] text-amber-600 mt-1">Isian lama "${escHtml(ed.cabang)}" tidak ada di daftar — pilih cabang yang sesuai.</p>` : ""}
               </div>`;
             }
             if (key === "baseline") {
