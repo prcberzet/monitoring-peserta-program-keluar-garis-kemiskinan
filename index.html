@@ -24,6 +24,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 <!-- Firebase (compat SDK, no build step needed) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
@@ -1323,7 +1324,12 @@ function participantHTML() {
 
     ${state.syncError ? `<div class="bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-xl px-4 py-3 mb-4">${state.syncError}</div>` : ""}
 
-    <div class="mb-5">${identityCardHTML(p, stage, independenceLevel, povertyStatus)}</div>
+    <div class="mb-3">${identityCardHTML(p, stage, independenceLevel, povertyStatus)}</div>
+    <div class="mb-5 flex justify-end">
+      <button onclick="downloadProgressPDF()" class="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg px-3 py-1.5">
+        <span class="w-3.5 h-3.5">${ICON.download}</span> Unduh Laporan PDF
+      </button>
+    </div>
 
     <div class="bg-white rounded-2xl border border-stone-200 p-4 mb-5">
       ${stepTrack(stage)}
@@ -1669,9 +1675,14 @@ function adminDetailHTML() {
 
     <div class="mb-5">${identityCardHTML(p, stage, independenceLevel, povertyStatus)}</div>
 
-    <button onclick="copyParticipantLink('${p.nik}')" class="mb-5 inline-flex items-center gap-1.5 text-xs font-medium text-brand-700 hover:underline">
-      <span class="w-3.5 h-3.5">${ICON.copy}</span> ${state.linkCopiedNik === p.nik ? "Tautan disalin!" : "Salin tautan kartu peserta ini"}
-    </button>
+    <div class="mb-5 flex items-center justify-between gap-3 flex-wrap">
+      <button onclick="copyParticipantLink('${p.nik}')" class="inline-flex items-center gap-1.5 text-xs font-medium text-brand-700 hover:underline">
+        <span class="w-3.5 h-3.5">${ICON.copy}</span> ${state.linkCopiedNik === p.nik ? "Tautan disalin!" : "Salin tautan kartu peserta ini"}
+      </button>
+      <button onclick="downloadProgressPDF()" class="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg px-3 py-1.5">
+        <span class="w-3.5 h-3.5">${ICON.download}</span> Unduh Laporan PDF
+      </button>
+    </div>
 
     ${sorted.length > 0 ? `<div class="bg-white rounded-2xl border border-stone-200 p-6 mb-5">
       <h3 class="font-display font-semibold text-stone-900 mb-3">Grafik Pertumbuhan</h3>
@@ -1876,6 +1887,275 @@ function confirmDeleteModal() {
       </div>
     </div>
   </div>`;
+}
+
+/* =====================================================================
+   7b) LAPORAN PDF PERKEMBANGAN KEMANDIRIAN (per peserta, dibuat di browser)
+   ===================================================================== */
+const LEVEL_DESC = {
+  mandiri: "Pendapatan per kapita >= 3x garis kemiskinan.",
+  aman: "Pendapatan per kapita >= 2x garis kemiskinan.",
+  rentan: "Pendapatan per kapita >= 1x garis kemiskinan.",
+  sangat_rentan: "Pendapatan per kapita sangat dekat dengan garis kemiskinan (0,9x - 1x).",
+  menuju_keluar: "Pendapatan per kapita masih di bawah garis kemiskinan.",
+};
+const LEVEL_PDF_COLOR = {
+  mandiri: [5, 150, 105], aman: [221, 86, 35], rentan: [217, 119, 6], sangat_rentan: [234, 88, 12], menuju_keluar: [225, 29, 72],
+};
+function nextLevelTarget(level, pl, hh) {
+  const steps = { menuju_keluar: [1, "keluar dari garis kemiskinan"], sangat_rentan: [1, "keluar dari garis kemiskinan (Rentan)"], rentan: [2, "tingkat Aman"], aman: [3, "tingkat Mandiri"] };
+  const s = steps[level];
+  return s ? { amount: s[0] * pl * hh, label: s[1] } : null;
+}
+
+function downloadProgressPDF() {
+  const J = window.jspdf && window.jspdf.jsPDF;
+  if (!J) { alert("Pustaka PDF belum termuat. Periksa koneksi internet lalu coba lagi."); return; }
+  const p = state.participant;
+  if (!p) return;
+  const entries = state.view === "admin-detail" ? (state.incomeMap[p.nik] || []) : state.entries;
+  const pl = state.povertyLine, hh = householdSize(p), threshold = pl * hh;
+  const level = getIndependenceLevel(entries, p, pl);
+  const status = getPovertyStatus(entries, p, pl);
+  const ref = referenceMonthlyIncome(entries);
+  const curAcc = currentMonthAccumulated(entries);
+  const items = groupHistoryForDisplay(entries);
+  const sorted = sortedEntries(entries);
+  const trend = getTrend(entries);
+  const interventions = state.view === "admin-detail" ? (state.interventions || []) : [];
+  const perCapita = ref.total / hh;
+  const ratio = pl > 0 ? perCapita / pl : 0;
+
+  const doc = new J({ unit: "mm", format: "a4" });
+  const W = 210, H = 297, M = 15, CW = W - 2 * M;
+  const BRAND = [221, 86, 35], INK = [28, 25, 23], MUTED = [120, 113, 108], LINE = [231, 229, 228];
+  let y = 0;
+  const txt = (s, x, yy, o) => doc.text(Array.isArray(s) ? s : String(s == null ? "" : s), x, yy, o);
+  const setFont = (style, size, color) => { doc.setFont("helvetica", style); doc.setFontSize(size); doc.setTextColor(...(color || INK)); };
+  const ensure = (h) => { if (y + h > H - 18) { doc.addPage(); y = M; } };
+  const section = (title) => {
+    ensure(14);
+    setFont("bold", 11, INK); txt(title, M, y);
+    doc.setDrawColor(...BRAND); doc.setLineWidth(0.6); doc.line(M, y + 1.8, M + 12, y + 1.8);
+    y += 7;
+  };
+  const fmtDateFull = (iso) => new Date(iso).toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
+  const imgFmt = (d) => (/^data:image\/png/i.test(d) ? "PNG" : /^data:image\/webp/i.test(d) ? "WEBP" : "JPEG");
+
+  /* --- Header --- */
+  doc.setFillColor(...BRAND); doc.rect(0, 0, W, 30, "F");
+  try { doc.setFillColor(255, 255, 255); doc.roundedRect(M, 6, 18, 18, 2, 2, "F"); doc.addImage(LOGO_SRC, "PNG", M + 1.5, 7.5, 15, 15); } catch (e) {}
+  setFont("normal", 8, [255, 255, 255]); txt("RUMAH ZAKAT  -  LANGKAH MANDIRI", M + 22, 13);
+  setFont("bold", 15, [255, 255, 255]); txt("Laporan Perkembangan Kemandirian", M + 22, 20);
+  setFont("normal", 8, [255, 255, 255]); txt("Dicetak: " + fmtDateFull(todayISO()), W - M, 13, { align: "right" });
+  y = 38;
+
+  /* --- Identitas --- */
+  const photoW = 26, photoH = 34;
+  let photoOk = false;
+  if (p.fotoBase64) {
+    try { doc.addImage(p.fotoBase64, imgFmt(p.fotoBase64), M, y, photoW, photoH); photoOk = true; } catch (e) {}
+  }
+  if (!photoOk) {
+    doc.setFillColor(254, 235, 224); doc.rect(M, y, photoW, photoH, "F");
+    setFont("bold", 16, BRAND); txt(initials(p.nama), M + photoW / 2, y + photoH / 2 + 2, { align: "center" });
+  }
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.rect(M, y, photoW, photoH);
+  const idRows = [
+    ["Nama", p.nama], ["NIK", p.nik], ["Alamat", p.alamat], ["No. Telp", p.noTelpon],
+    ["Cabang / Departemen", [p.cabang, p.departemen].filter(Boolean).join(" / ")],
+    ["Tanggungan", (p.jumlahTanggungan || 0) + " orang  (anggota rumah tangga: " + hh + ")"],
+    ["Jenis / Produk Usaha", [p.jenisUsaha, p.produkUsaha].filter(Boolean).join(" / ")],
+  ];
+  let iy = y + 3;
+  const lx = M + photoW + 6, vx = lx + 40, vw = W - M - vx;
+  idRows.forEach(([l, v]) => {
+    setFont("normal", 8.5, MUTED); txt(l, lx, iy);
+    setFont("bold", 9, INK);
+    const lines = doc.splitTextToSize(String(v || "-"), vw);
+    txt(lines, vx, iy);
+    iy += Math.max(1, lines.length) * 4.3 + 0.9;
+  });
+  y = Math.max(y + photoH, iy) + 6;
+
+  /* --- Ringkasan status --- */
+  section("Ringkasan Kemandirian");
+  const boxH = 24, half = (CW - 4) / 2;
+  const lvlColor = level ? LEVEL_PDF_COLOR[level] : MUTED;
+  doc.setFillColor(250, 250, 249); doc.setDrawColor(...LINE);
+  doc.roundedRect(M, y, half, boxH, 2, 2, "FD");
+  doc.roundedRect(M + half + 4, y, half, boxH, 2, 2, "FD");
+  setFont("normal", 7.5, MUTED); txt("TINGKAT KEMANDIRIAN", M + 4, y + 6);
+  setFont("bold", 15, lvlColor); txt(level ? INDEPENDENCE_LEVELS[level].label : "Belum ada data", M + 4, y + 14);
+  setFont("normal", 7.5, MUTED); txt(doc.splitTextToSize(level ? LEVEL_DESC[level] : "Belum ada data pendapatan.", half - 8), M + 4, y + 19);
+  const stColor = status === "keluar" ? [5, 150, 105] : status === "menuju" ? [217, 119, 6] : MUTED;
+  setFont("normal", 7.5, MUTED); txt("STATUS GARIS KEMISKINAN", M + half + 8, y + 6);
+  setFont("bold", 11.5, stColor); txt(status ? POVERTY_STATUS_META[status].label : "Belum ada data", M + half + 8, y + 14);
+  setFont("normal", 7.5, MUTED); txt("Ambang: " + rupiah(threshold) + " / bulan", M + half + 8, y + 19.5);
+  y += boxH + 5;
+
+  const trendTxt = trend.pct === null ? "Belum cukup data" : (trend.pct > 0 ? "+" : "") + trend.pct.toFixed(0) + "% (entri pertama ke terakhir)";
+  const base = p.baseline == null ? null : Number(p.baseline);
+  let baseTxt = "Belum diisi", deltaTxt = "-";
+  if (base != null) {
+    baseTxt = rupiah(base) + " / bulan";
+    if (ref.label) {
+      const d = ref.total - base;
+      deltaTxt = (d >= 0 ? "+" : "-") + rupiah(Math.abs(d)) + (base > 0 ? "  (" + (d >= 0 ? "+" : "") + ((d / base) * 100).toFixed(0) + "%)" : "");
+    }
+  }
+  const metrics = [
+    ["Pendapatan acuan" + (ref.label ? " (" + ref.label + (ref.complete ? "" : ", berjalan") + ")" : ""), ref.label ? rupiah(ref.total) : "-"],
+    ["Pendapatan per kapita / bulan", ref.label ? rupiah(perCapita) : "-"],
+    ["Garis kemiskinan per kapita", rupiah(pl)],
+    ["Rasio terhadap garis kemiskinan", ref.label ? ratio.toFixed(2).replace(".", ",") + "x" : "-"],
+    ["Baseline (sebelum intervensi)", baseTxt],
+    ["Perubahan terhadap baseline", deltaTxt],
+    ["Tren pendapatan", trendTxt],
+    ["Jumlah pencatatan pendapatan", sorted.length + " kali" + (sorted.length ? " (" + fmtDate(sorted[0].tanggal) + " - " + fmtDate(sorted[sorted.length - 1].tanggal) + ")" : "")],
+  ];
+  if (curAcc && ref.complete) metrics.splice(1, 0, ["Akumulasi " + curAcc.label + " (berjalan)", rupiah(curAcc.total)]);
+  metrics.forEach(([l, v], i) => {
+    ensure(7);
+    if (i % 2 === 0) { doc.setFillColor(250, 250, 249); doc.rect(M, y - 4.2, CW, 6.4, "F"); }
+    setFont("normal", 9, MUTED); txt(l, M + 2, y);
+    setFont("bold", 9, INK); txt(v, M + CW - 2, y, { align: "right" });
+    y += 6.4;
+  });
+  const nxt = level ? nextLevelTarget(level, pl, hh) : null;
+  y += 1;
+  if (nxt) {
+    const gap = Math.max(0, nxt.amount - ref.total);
+    const msg = gap > 0
+      ? "Untuk mencapai " + nxt.label + ", pendapatan bulanan perlu mencapai " + rupiah(nxt.amount) + " (selisih " + rupiah(gap) + ")."
+      : "Pendapatan bulanan sudah melampaui " + rupiah(nxt.amount) + ".";
+    const ml = doc.splitTextToSize(msg, CW - 8);
+    ensure(ml.length * 4.4 + 8);
+    doc.setFillColor(254, 244, 238); doc.roundedRect(M, y, CW, ml.length * 4.4 + 5, 2, 2, "F");
+    setFont("normal", 8.5, [154, 52, 18]); txt(ml, M + 4, y + 5.2);
+    y += ml.length * 4.4 + 9;
+  } else if (level === "mandiri") {
+    ensure(12);
+    doc.setFillColor(236, 253, 245); doc.roundedRect(M, y, CW, 9, 2, 2, "F");
+    setFont("normal", 8.5, [6, 95, 70]); txt("Peserta telah mencapai tingkat kemandirian tertinggi (Mandiri).", M + 4, y + 5.8);
+    y += 13;
+  }
+
+  /* --- Grafik (digambar vektor) --- */
+  if (items.length > 0) {
+    ensure(68 + 16);
+    section("Grafik Perkembangan Pendapatan");
+    const ch = 68, cx = M + 18, cw = CW - 22, cy = y + 2, plotH = ch - 24;
+    const maxV = Math.max(threshold, ...items.map((it) => it.total), 1);
+    const rawStep = maxV / 5, mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= rawStep) || mag * 10;
+    const top = Math.ceil(maxV / step) * step;
+    const gy = (v) => cy + plotH - (v / top) * plotH;
+    doc.setLineWidth(0.15); doc.setDrawColor(...LINE);
+    for (let v = 0; v <= top + 1; v += step) {
+      doc.line(cx, gy(v), cx + cw, gy(v));
+      setFont("normal", 7, MUTED);
+      txt(v >= 1e6 ? (v / 1e6).toLocaleString("id-ID", { maximumFractionDigits: 2 }) + " jt" : Math.round(v / 1000) + " rb", cx - 2, gy(v) + 1, { align: "right" });
+    }
+    const n = items.length;
+    const gx = (i) => n === 1 ? cx + cw / 2 : cx + 4 + (i * (cw - 8)) / (n - 1);
+    // ambang
+    doc.setDrawColor(220, 38, 38); doc.setLineWidth(0.5);
+    if (doc.setLineDashPattern) doc.setLineDashPattern([1.5, 1.2], 0);
+    doc.line(cx, gy(threshold), cx + cw, gy(threshold));
+    if (doc.setLineDashPattern) doc.setLineDashPattern([], 0);
+    // garis pendapatan
+    doc.setDrawColor(...BRAND); doc.setLineWidth(0.7);
+    for (let i = 1; i < n; i++) doc.line(gx(i - 1), gy(items[i - 1].total), gx(i), gy(items[i].total));
+    doc.setFillColor(...BRAND);
+    items.forEach((it, i) => doc.circle(gx(i), gy(it.total), 1, "F"));
+    // label sumbu x
+    const skip = Math.ceil(n / 10);
+    setFont("normal", 6.5, MUTED);
+    items.forEach((it, i) => { if (i % skip === 0 || i === n - 1) txt(it.label, gx(i), cy + plotH + 4, { angle: n > 4 ? -35 : 0, align: n > 4 ? "right" : "center" }); });
+    // legenda
+    const ly = cy + ch - 3;
+    doc.setFillColor(...BRAND); doc.rect(cx, ly - 2, 5, 1.4, "F");
+    setFont("normal", 7.5, INK); txt("Pendapatan (bulan selesai: total bulanan; bulan berjalan: per pekan)", cx + 7, ly - 0.8);
+    y = cy + ch + 3;
+    doc.setDrawColor(220, 38, 38); doc.setLineWidth(0.5);
+    if (doc.setLineDashPattern) doc.setLineDashPattern([1.2, 1], 0);
+    doc.line(cx, y - 1, cx + 5, y - 1);
+    if (doc.setLineDashPattern) doc.setLineDashPattern([], 0);
+    setFont("normal", 7.5, INK); txt("Garis Kemiskinan x Tanggungan (" + rupiah(threshold) + ")", cx + 7, y - 0.4);
+    y += 7;
+  }
+
+  /* --- Tabel histori --- */
+  section("Rincian Pendapatan per Periode");
+  if (items.length === 0) {
+    setFont("normal", 9, MUTED); txt("Belum ada data pendapatan.", M, y); y += 8;
+  } else {
+    const cols = [{ t: "Periode", x: M + 2, a: "left" }, { t: "Jenis", x: M + 62, a: "left" }, { t: "Input", x: M + 98, a: "right" }, { t: "Total", x: M + 135, a: "right" }, { t: "vs Ambang", x: M + CW - 2, a: "right" }];
+    const head = () => {
+      doc.setFillColor(...BRAND); doc.rect(M, y - 4.4, CW, 6.6, "F");
+      setFont("bold", 8, [255, 255, 255]); cols.forEach((c) => txt(c.t, c.x, y, { align: c.a })); y += 6.4;
+    };
+    ensure(20); head();
+    [...items].reverse().forEach((it, i) => {
+      if (y > H - 22) { doc.addPage(); y = M + 4; head(); }
+      if (i % 2 === 0) { doc.setFillColor(250, 250, 249); doc.rect(M, y - 4.2, CW, 6.2, "F"); }
+      const monthly = it.type === "monthly";
+      setFont("normal", 8.5, INK); txt(it.label, cols[0].x, y);
+      setFont("normal", 8.5, MUTED); txt(monthly ? "Total bulanan" : "Pekan (bulan berjalan)", cols[1].x, y);
+      txt(it.count + "x", cols[2].x, y, { align: "right" });
+      setFont("bold", 8.5, INK); txt(rupiah(it.total), cols[3].x, y, { align: "right" });
+      if (monthly) {
+        const r = threshold > 0 ? (it.total / threshold) * 100 : 0;
+        setFont("bold", 8.5, it.total >= threshold ? [5, 150, 105] : [217, 119, 6]);
+        txt(r.toFixed(0) + "%", cols[4].x, y, { align: "right" });
+      } else { setFont("normal", 8.5, MUTED); txt("-", cols[4].x, y, { align: "right" }); }
+      y += 6.2;
+    });
+    y += 1;
+    setFont("normal", 7.5, MUTED);
+    const nl = doc.splitTextToSize("Persentase 'vs Ambang' = total bulanan dibanding Garis Kemiskinan x (tanggungan + 1). Rentang pekan: tgl 1-7 = Pekan 1, 8-14 = Pekan 2, 15-21 = Pekan 3, 22-31 = Pekan 4.", CW);
+    ensure(nl.length * 3.6 + 2); txt(nl, M, y); y += nl.length * 3.6 + 4;
+  }
+
+  /* --- Intervensi --- */
+  if (interventions.length > 0) {
+    section("Riwayat Intervensi");
+    interventions.forEach((e, i) => {
+      const desc = [e.keterangan, e.nominal ? rupiah(e.nominal) : ""].filter(Boolean).join("  -  ");
+      const dl = doc.splitTextToSize(desc, CW - 40);
+      ensure(Math.max(1, dl.length) * 4.2 + 3);
+      if (i % 2 === 0) { doc.setFillColor(250, 250, 249); doc.rect(M, y - 4.2, CW, Math.max(1, dl.length) * 4.2 + 1.8, "F"); }
+      setFont("normal", 8.5, MUTED); txt(fmtDate(e.tanggal), M + 2, y);
+      setFont("bold", 8.5, INK); txt(e.jenis || "-", M + 32, y);
+      if (dl.length && desc) { setFont("normal", 8, MUTED); txt(dl, M + 32, y + 4.2); y += dl.length * 4.2; }
+      y += 6;
+    });
+    y += 2;
+  }
+
+  /* --- Catatan metode --- */
+  ensure(30);
+  section("Catatan Metode");
+  setFont("normal", 8, MUTED);
+  const notes = [
+    "Pendapatan acuan = total akumulasi bulan terakhir yang sudah selesai; bila belum ada bulan penuh, dipakai akumulasi bulan berjalan sebagai acuan sementara.",
+    "Status 'Keluar dari Garis Kemiskinan' bila pendapatan acuan >= Garis Kemiskinan x (jumlah tanggungan + 1).",
+    "Tingkat kemandirian dari rasio pendapatan per kapita terhadap garis kemiskinan: >= 3x Mandiri; >= 2x Aman; >= 1x Rentan; 0,9x - 1x Sangat Rentan; < 0,9x Menuju Keluar GK.",
+  ];
+  notes.forEach((n) => { const l = doc.splitTextToSize("- " + n, CW); ensure(l.length * 3.8 + 1); txt(l, M, y); y += l.length * 3.8 + 1.5; });
+
+  /* --- Footer --- */
+  const pages = doc.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, H - 12, W - M, H - 12);
+    setFont("normal", 7.5, MUTED);
+    txt("Rumah Zakat - Langkah Mandiri  |  " + (p.nama || "") + "  |  NIK " + (p.nik || ""), M, H - 7.5);
+    txt("Halaman " + i + " / " + pages, W - M, H - 7.5, { align: "right" });
+  }
+  const safe = (s) => String(s || "").replace(/[^\w\-]+/g, "_").replace(/^_+|_+$/g, "");
+  doc.save("Laporan_Kemandirian_" + safe(p.nama) + "_" + safe(p.nik) + ".pdf");
 }
 
 /* =====================================================================
