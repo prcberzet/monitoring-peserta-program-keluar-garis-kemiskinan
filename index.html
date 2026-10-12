@@ -22,6 +22,7 @@
   };
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
 <!-- Firebase (compat SDK, no build step needed) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
@@ -395,6 +396,198 @@ function deleteIncomeEntryDoc(nik, entryId) {
 function saveParticipantDoc(nik, data) {
   return db.collection("participants").doc(nik).set(data, { merge: true });
 }
+
+/* ---------- FILTER CABANG & DEPARTEMEN ---------- */
+const FILTER_NONE = "__none__"; // opsi untuk peserta yang Cabang/Departemennya belum diisi
+function distinctValues(list, key) {
+  return [...new Set(list.map((p) => String(p[key] || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "id"));
+}
+function matchFilter(value, filter) {
+  const v = String(value || "").trim();
+  if (!filter) return true;
+  if (filter === FILTER_NONE) return v === "";
+  return v === filter;
+}
+function setAdminFilter(key, val) { state[key === "cabang" ? "filterCabang" : "filterDepartemen"] = val; render(); }
+function resetAdminFilter() { state.filterCabang = ""; state.filterDepartemen = ""; render(); }
+
+/* ---------- IMPOR PESERTA MASSAL (EXCEL) ---------- */
+// Kolom template mengikuti form "Tambah Peserta" (Foto diunggah manual lewat form).
+const IMPORT_COLUMNS = [
+  { key: "nama", header: "Nama Lengkap *", aliases: ["nama", "namalengkap"], width: 28 },
+  { key: "nik", header: "NIK *", aliases: ["nik"], width: 22 },
+  { key: "noTelpon", header: "No. Telpon", aliases: ["notelpon", "notelp", "notelepon", "telepon", "telpon", "nohp", "hp"], width: 18 },
+  { key: "cabang", header: "Cabang", aliases: ["cabang"], width: 20 },
+  { key: "departemen", header: "Departemen", aliases: ["departemen", "department", "dept"], width: 20 },
+  { key: "jumlahTanggungan", header: "Jumlah Tanggungan", aliases: ["jumlahtanggungan", "tanggungan"], width: 20 },
+  { key: "jenisUsaha", header: "Jenis Usaha", aliases: ["jenisusaha"], width: 24 },
+  { key: "produkUsaha", header: "Produk Usaha", aliases: ["produkusaha"], width: 24 },
+  { key: "alamat", header: "Alamat", aliases: ["alamat"], width: 44 },
+];
+
+function downloadParticipantTemplate() {
+  if (typeof XLSX === "undefined") { alert("Library Excel belum termuat. Periksa koneksi internet lalu coba lagi."); return; }
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 1: Data Peserta (header saja; kolom NIK & No. Telpon dipaksa format Teks)
+  const ws = XLSX.utils.aoa_to_sheet([IMPORT_COLUMNS.map((c) => c.header)]);
+  const textCols = [1, 2]; // NIK, No. Telpon
+  for (let r = 1; r <= 500; r++) {
+    textCols.forEach((c) => { ws[XLSX.utils.encode_cell({ r, c })] = { t: "s", v: "", z: "@" }; });
+  }
+  ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 500, c: IMPORT_COLUMNS.length - 1 } });
+  ws["!cols"] = IMPORT_COLUMNS.map((c) => ({ wch: c.width }));
+  XLSX.utils.book_append_sheet(wb, ws, "Data Peserta");
+
+  // Sheet 2: Petunjuk + contoh pengisian
+  const guide = [
+    ["PETUNJUK PENGISIAN — Template Peserta Program Langkah Mandiri"],
+    [""],
+    ["1. Isi data peserta pada sheet \"Data Peserta\", satu peserta per baris, mulai baris ke-2. Jangan ubah/hapus baris judul kolom."],
+    ["2. Kolom bertanda * (Nama Lengkap, NIK) wajib diisi."],
+    ["3. NIK hanya angka, tanpa spasi/titik/tanda baca (umumnya 16 digit). Kolom NIK sudah berformat Teks — jangan diubah ke Angka, karena Excel akan memotong digit NIK."],
+    ["4. Jumlah Tanggungan diisi angka bulat (mis. 3). Jika kosong dianggap 0."],
+    ["5. NIK harus unik. NIK yang sudah terdaftar di aplikasi akan dilewati (atau diperbarui jika opsi \"Perbarui\" dicentang saat upload)."],
+    ["6. Cabang dan Departemen dipakai sebagai pembeda & filter di dashboard. Tulis dengan ejaan yang konsisten (mis. selalu \"Social Service\", bukan \"social service\" atau \"SS\") agar filter tidak terpecah."],
+    ["7. Foto peserta tidak diunggah lewat Excel — tambahkan lewat tombol Ubah pada peserta setelah impor."],
+    [""],
+    ["CONTOH PENGISIAN (jangan disalin bersama baris ini):"],
+    IMPORT_COLUMNS.map((c) => c.header),
+    ["Saepudin", "3203200709780003", "085314571889", "Cianjur", "Social Service", 1, "Konveksi", "Topi", "Kp. Sirnagalih RT003 RW004 Desa Padasuka Kec. Cibinong Kab. Cianjur"],
+  ];
+  const wsGuide = XLSX.utils.aoa_to_sheet(guide);
+  wsGuide["!cols"] = IMPORT_COLUMNS.map((c) => ({ wch: c.width }));
+  XLSX.utils.book_append_sheet(wb, wsGuide, "Petunjuk");
+
+  XLSX.writeFile(wb, "Template_Peserta_Program_Langkah_Mandiri.xlsx");
+}
+
+const escHtml = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function normHeader(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
+
+function parseParticipantSheet(arrayBuffer, existingNiks) {
+  const wb = XLSX.read(arrayBuffer, { type: "array" });
+  const sheetName = wb.SheetNames.includes("Data Peserta") ? "Data Peserta" : wb.SheetNames[0];
+  const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: true, defval: "" });
+  if (aoa.length === 0) throw new Error("File Excel kosong.");
+
+  // petakan kolom berdasarkan judul (urutan kolom bebas, tanda * diabaikan)
+  const colIndex = {};
+  aoa[0].forEach((h, i) => {
+    const n = normHeader(h);
+    const col = IMPORT_COLUMNS.find((c) => c.aliases.includes(n));
+    if (col && colIndex[col.key] === undefined) colIndex[col.key] = i;
+  });
+  if (colIndex.nama === undefined || colIndex.nik === undefined) {
+    throw new Error("Judul kolom tidak sesuai template. Pastikan kolom \"Nama Lengkap\" dan \"NIK\" ada di baris pertama (unduh ulang template jika perlu).");
+  }
+
+  const cell = (row, key) => (colIndex[key] === undefined ? "" : row[colIndex[key]]);
+  const seen = new Set();
+  const rows = [];
+  for (let i = 1; i < aoa.length; i++) {
+    const raw = aoa[i];
+    if (!raw.some((v) => String(v).trim() !== "")) continue; // lewati baris kosong
+    const errors = [];
+    const warnings = [];
+
+    const nama = String(cell(raw, "nama")).trim();
+
+    const nikRaw = cell(raw, "nik");
+    let nik = "";
+    if (typeof nikRaw === "number") {
+      if (nikRaw >= 1e15) errors.push("NIK tersimpan sebagai angka sehingga digit terakhir terpotong — ubah format kolom NIK menjadi Teks");
+      nik = String(Math.round(nikRaw));
+    } else {
+      nik = String(nikRaw).trim();
+    }
+    if (!nama) errors.push("Nama kosong");
+    if (!nik) errors.push("NIK kosong");
+    else if (!/^\d+$/.test(nik)) errors.push("NIK harus berisi angka saja");
+    else if (nik.length !== 16) warnings.push(`NIK ${nik.length} digit (umumnya 16)`);
+
+    const tgRaw = cell(raw, "jumlahTanggungan");
+    let tanggungan = 0;
+    if (String(tgRaw).trim() !== "") {
+      const n = Number(String(tgRaw).replace(",", "."));
+      if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) errors.push("Jumlah Tanggungan harus angka bulat ≥ 0");
+      else tanggungan = n;
+    }
+
+    if (nik && !errors.some((e) => e.startsWith("NIK"))) {
+      if (seen.has(nik)) errors.push("NIK ganda di dalam file");
+      seen.add(nik);
+    }
+
+    const data = {
+      nama,
+      nik,
+      noTelpon: String(cell(raw, "noTelpon")).trim(),
+      alamat: String(cell(raw, "alamat")).trim(),
+      cabang: String(cell(raw, "cabang")).trim(),
+      departemen: String(cell(raw, "departemen")).trim(),
+      jumlahTanggungan: tanggungan,
+      jenisUsaha: String(cell(raw, "jenisUsaha")).trim(),
+      produkUsaha: String(cell(raw, "produkUsaha")).trim(),
+    };
+    const status = errors.length ? "error" : (existingNiks.has(nik) ? "exists" : "new");
+    rows.push({ excelRow: i + 1, data, status, errors, warnings, tgGiven: String(tgRaw).trim() !== "" });
+  }
+  if (rows.length === 0) throw new Error("Tidak ada baris data peserta yang terbaca di file ini.");
+  return rows;
+}
+
+function handleParticipantExcel(input) {
+  const file = input.files && input.files[0];
+  input.value = ""; // agar file yang sama bisa dipilih ulang
+  if (!file) return;
+  if (typeof XLSX === "undefined") { alert("Library Excel belum termuat. Periksa koneksi internet lalu coba lagi."); return; }
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    try {
+      const existing = new Set(state.participants.map((p) => p.nik));
+      const rows = parseParticipantSheet(ev.target.result, existing);
+      state.importPreview = { fileName: file.name, rows, updateExisting: false, importing: false, result: null, error: "" };
+    } catch (err) {
+      state.importPreview = { fileName: file.name, rows: [], updateExisting: false, importing: false, result: null, error: err.message || "Gagal membaca file Excel." };
+    }
+    render();
+  };
+  reader.onerror = () => { state.importPreview = { fileName: file.name, rows: [], updateExisting: false, importing: false, result: null, error: "Gagal membaca file." }; render(); };
+  reader.readAsArrayBuffer(file);
+}
+function closeImportPreview() { state.importPreview = null; render(); }
+function toggleImportUpdate(checked) { state.importPreview.updateExisting = checked; render(); }
+
+async function runParticipantImport() {
+  const pv = state.importPreview;
+  if (!pv || pv.importing) return;
+  const toWrite = pv.rows.filter((r) => r.status === "new" || (r.status === "exists" && pv.updateExisting));
+  if (toWrite.length === 0) return;
+  pv.importing = true; pv.error = ""; render();
+  let created = 0, updated = 0;
+  try {
+    for (let i = 0; i < toWrite.length; i += 400) { // batas Firestore 500 operasi/batch
+      const batch = db.batch();
+      toWrite.slice(i, i + 400).forEach((r) => {
+        const ref = db.collection("participants").doc(r.data.nik);
+        if (r.status === "new") { batch.set(ref, { ...r.data, fotoBase64: null }); created++; }
+        else {
+          // perbarui hanya kolom yang terisi di Excel; sel kosong tidak menghapus data lama
+          const d = Object.fromEntries(Object.entries(r.data).filter(([k, v]) => v !== "" && (k !== "jumlahTanggungan" || r.tgGiven)));
+          batch.set(ref, d, { merge: true }); updated++; // merge: foto & data lain tidak tertimpa
+        }
+      });
+      await batch.commit();
+    }
+    pv.result = { created, updated, skipped: pv.rows.filter((r) => r.status === "exists").length - updated, errors: pv.rows.filter((r) => r.status === "error").length };
+  } catch (err) {
+    console.error("[Langkah Mandiri] Impor gagal:", err);
+    pv.error = "Impor gagal sebagian/seluruhnya: " + (err && err.message ? err.message : "periksa koneksi & izin akses.");
+  }
+  pv.importing = false;
+  render();
+}
 /* NIK dipakai sebagai ID dokumen di Firestore, jadi mengubah NIK berarti
    memindahkan seluruh dokumen (data peserta + histori pendapatan +
    intervensi) ke dokumen baru, lalu menghapus yang lama. Link Kartu Peserta
@@ -499,6 +692,9 @@ let state = {
   expandedMonths: {},
   showPovertyModal: false,
   syncError: null,
+  importPreview: null,
+  filterCabang: "",
+  filterDepartemen: "",
 };
 let chartRef = null;
 let pendingPhotoBase64 = null;
@@ -636,6 +832,8 @@ function saveParticipantForm(ev) {
     noTelpon: f.noTelpon.value.trim(),
     alamat: f.alamat.value.trim(),
     jumlahTanggungan: Number(f.jumlahTanggungan.value) || 0,
+    cabang: f.cabang.value.trim(),
+    departemen: f.departemen.value.trim(),
     jenisUsaha: f.jenisUsaha.value.trim(),
     produkUsaha: f.produkUsaha.value.trim(),
     fotoBase64: pendingPhotoBase64 || null,
@@ -972,7 +1170,14 @@ function adminLoginHTML() {
 
 /* ---------- ADMIN DASHBOARD ---------- */
 function adminHTML() {
-  const { participants, incomeMap, povertyLine } = state;
+  const { participants: allParticipants, incomeMap, povertyLine } = state;
+  const cabangOpts = distinctValues(allParticipants, "cabang");
+  const deptOpts = distinctValues(allParticipants, "departemen");
+  // filter yang nilainya sudah tidak ada lagi (mis. peserta terakhir dihapus) dikembalikan ke "Semua"
+  if (state.filterCabang && state.filterCabang !== FILTER_NONE && !cabangOpts.includes(state.filterCabang)) state.filterCabang = "";
+  if (state.filterDepartemen && state.filterDepartemen !== FILTER_NONE && !deptOpts.includes(state.filterDepartemen)) state.filterDepartemen = "";
+  const participants = allParticipants.filter((p) => matchFilter(p.cabang, state.filterCabang) && matchFilter(p.departemen, state.filterDepartemen));
+  const isFiltered = !!(state.filterCabang || state.filterDepartemen);
   let diatasGK = 0, totalGrowth = 0, growthCount = 0;
   const tierCounts = { mandiri: 0, aman: 0, rentan: 0, sangat_rentan: 0 };
   participants.forEach((p) => {
@@ -1004,6 +1209,10 @@ function adminHTML() {
             <div class="font-mono text-[11px] text-stone-400">${p.nik}</div>
           </div>
         </div>
+      </td>
+      <td class="py-2.5 pr-3 text-stone-600">
+        <div class="text-stone-800">${escHtml(p.cabang) || "-"}</div>
+        <div class="text-[11px] text-stone-400">${escHtml(p.departemen) || "-"}</div>
       </td>
       <td class="py-2.5 pr-3 text-stone-600">${p.jenisUsaha || "-"}</td>
       <td class="py-2.5 pr-3 font-mono text-stone-800">${rupiah(monthRef.total)}</td>
@@ -1043,9 +1252,31 @@ function adminHTML() {
       </div>
     </div>
 
+    <div class="bg-white rounded-2xl border border-stone-200 px-4 py-3 mb-4 flex items-end gap-3 flex-wrap">
+      <div class="text-[11px] uppercase tracking-wide text-stone-400 font-medium self-center mr-1">Filter</div>
+      <div>
+        <label class="text-[11px] text-stone-500 font-medium block mb-1">Cabang</label>
+        <select id="filterCabang" onchange="setAdminFilter('cabang', this.value)" class="border border-stone-300 rounded-lg px-3 py-1.5 text-sm bg-white min-w-[9rem]">
+          <option value="">Semua cabang</option>
+          ${cabangOpts.map((v) => `<option value="${escHtml(v)}" ${state.filterCabang === v ? "selected" : ""}>${escHtml(v)}</option>`).join("")}
+          <option value="${FILTER_NONE}" ${state.filterCabang === FILTER_NONE ? "selected" : ""}>(Belum diisi)</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-[11px] text-stone-500 font-medium block mb-1">Departemen</label>
+        <select id="filterDepartemen" onchange="setAdminFilter('departemen', this.value)" class="border border-stone-300 rounded-lg px-3 py-1.5 text-sm bg-white min-w-[9rem]">
+          <option value="">Semua departemen</option>
+          ${deptOpts.map((v) => `<option value="${escHtml(v)}" ${state.filterDepartemen === v ? "selected" : ""}>${escHtml(v)}</option>`).join("")}
+          <option value="${FILTER_NONE}" ${state.filterDepartemen === FILTER_NONE ? "selected" : ""}>(Belum diisi)</option>
+        </select>
+      </div>
+      ${isFiltered ? `<button onclick="resetAdminFilter()" class="text-xs font-medium text-brand-700 hover:underline pb-2">Reset filter</button>` : ""}
+      <div class="text-xs text-stone-400 pb-2 ml-auto">Ringkasan & tabel mengikuti filter · ${participants.length} dari ${allParticipants.length} peserta</div>
+    </div>
+
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
       ${[
-        ["Total Peserta", participants.length, "text-stone-900"],
+        ["Total Peserta", isFiltered ? `${participants.length} <span class="text-sm font-medium text-stone-400">dari ${allParticipants.length}</span>` : participants.length, "text-stone-900"],
         ["Diatas Garis Kemiskinan", diatasGK, "text-emerald-700"],
         ["Rata-rata Pertumbuhan", avgGrowth === null ? "—" : `${avgGrowth > 0 ? "+" : ""}${avgGrowth.toFixed(0)}%`, avgGrowth > 0 ? "text-emerald-700" : "text-stone-900"],
       ].map(([label, val, cls]) => `
@@ -1066,16 +1297,25 @@ function adminHTML() {
     </div>
 
     <div class="bg-white rounded-2xl border border-stone-200 p-6">
-      <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center justify-between gap-3 mb-4 flex-wrap">
         <h3 class="font-display font-semibold text-stone-900">Data Peserta Program</h3>
-        <button onclick="openParticipantForm(null)" class="inline-flex items-center gap-1.5 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg px-3.5 py-2">
-          <span class="w-4 h-4">${ICON.plus}</span> Tambah Peserta
-        </button>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button onclick="downloadParticipantTemplate()" class="inline-flex items-center gap-1.5 text-sm font-semibold text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-lg px-3 py-2">
+            Template Excel
+          </button>
+          <label class="inline-flex items-center gap-1.5 text-sm font-semibold text-brand-700 bg-brand-50 border border-brand-200 hover:bg-brand-100 rounded-lg px-3 py-2 cursor-pointer">
+            Upload Excel
+            <input type="file" accept=".xlsx,.xls" class="hidden" onchange="handleParticipantExcel(this)" />
+          </label>
+          <button onclick="openParticipantForm(null)" class="inline-flex items-center gap-1.5 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg px-3.5 py-2">
+            <span class="w-4 h-4">${ICON.plus}</span> Tambah Peserta
+          </button>
+        </div>
       </div>
-      ${participants.length === 0 ? `<p class="text-sm text-stone-400 py-6 text-center">Belum ada peserta terdaftar.</p>` : `
+      ${participants.length === 0 ? `<p class="text-sm text-stone-400 py-6 text-center">${allParticipants.length === 0 ? "Belum ada peserta terdaftar." : "Tidak ada peserta yang cocok dengan filter."}</p>` : `
       <div class="overflow-x-auto"><table class="w-full text-sm">
         <thead><tr class="text-left text-[11px] uppercase text-stone-400 font-medium border-b border-stone-100">
-          <th class="py-2 pr-3">Nama</th><th class="py-2 pr-3">Jenis Usaha</th><th class="py-2 pr-3">Pendapatan Terakhir</th>
+          <th class="py-2 pr-3">Nama</th><th class="py-2 pr-3">Cabang / Departemen</th><th class="py-2 pr-3">Jenis Usaha</th><th class="py-2 pr-3">Pendapatan Terakhir</th>
           <th class="py-2 pr-3">Per Kapita</th><th class="py-2 pr-3">Status</th><th class="py-2 pr-3">Tingkat Kemandirian</th><th class="py-2 pr-3">Tren</th><th class="py-2 pr-3"></th>
         </tr></thead>
         <tbody>${rows}</tbody>
@@ -1085,7 +1325,73 @@ function adminHTML() {
 
   ${state.showForm ? participantFormModal() : ""}
   ${state.confirmDelete ? confirmDeleteModal() : ""}
-  ${state.showPovertyModal ? povertyLineModal() : ""}`;
+  ${state.showPovertyModal ? povertyLineModal() : ""}
+  ${state.importPreview ? importPreviewModal() : ""}`;
+}
+
+function importPreviewModal() {
+  const pv = state.importPreview;
+  const cnt = { new: 0, exists: 0, error: 0 };
+  pv.rows.forEach((r) => cnt[r.status]++);
+  const willWrite = cnt.new + (pv.updateExisting ? cnt.exists : 0);
+  const badge = {
+    new: `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-100 rounded-full px-2 py-0.5">Baru</span>`,
+    exists: `<span class="text-[11px] font-semibold ${pv.updateExisting ? "text-amber-700 bg-amber-100" : "text-stone-600 bg-stone-200"} rounded-full px-2 py-0.5">${pv.updateExisting ? "Diperbarui" : "Dilewati (sudah ada)"}</span>`,
+    error: `<span class="text-[11px] font-semibold text-rose-700 bg-rose-100 rounded-full px-2 py-0.5">Error</span>`,
+  };
+  const close = pv.importing ? "" : "closeImportPreview()";
+  let body;
+  if (pv.result) {
+    const r = pv.result;
+    body = `<div class="rounded-xl bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-800 space-y-1">
+        <div class="font-semibold">Impor selesai.</div>
+        <div>${r.created} peserta baru ditambahkan${r.updated ? `, ${r.updated} diperbarui` : ""}${r.skipped > 0 ? `, ${r.skipped} dilewati (NIK sudah ada)` : ""}${r.errors ? `, ${r.errors} baris error tidak diimpor` : ""}.</div>
+      </div>
+      <div class="flex justify-end pt-3"><button onclick="closeImportPreview()" class="px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg">Tutup</button></div>`;
+  } else if (pv.rows.length === 0) {
+    body = `<p class="text-rose-600 text-sm">${escHtml(pv.error)}</p>
+      <div class="flex justify-end pt-3"><button onclick="closeImportPreview()" class="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Tutup</button></div>`;
+  } else {
+    body = `<div class="grid grid-cols-3 gap-2 mb-3 text-center">
+        <div class="rounded-xl bg-emerald-50 p-2.5"><div class="font-display font-bold text-xl text-emerald-700">${cnt.new}</div><div class="text-[11px] text-emerald-700">Peserta baru</div></div>
+        <div class="rounded-xl bg-stone-100 p-2.5"><div class="font-display font-bold text-xl text-stone-700">${cnt.exists}</div><div class="text-[11px] text-stone-600">NIK sudah ada</div></div>
+        <div class="rounded-xl bg-rose-50 p-2.5"><div class="font-display font-bold text-xl text-rose-700">${cnt.error}</div><div class="text-[11px] text-rose-700">Baris error</div></div>
+      </div>
+      ${cnt.exists > 0 ? `<label class="flex items-start gap-2 text-xs text-stone-600 mb-3 cursor-pointer">
+        <input type="checkbox" class="mt-0.5" ${pv.updateExisting ? "checked" : ""} onchange="toggleImportUpdate(this.checked)" />
+        <span>Perbarui data peserta yang NIK-nya sudah terdaftar (hanya kolom yang terisi di Excel; sel kosong tidak menghapus data lama). Foto dan histori pendapatan tidak berubah. Jika tidak dicentang, baris tersebut dilewati.</span>
+      </label>` : ""}
+      <div class="border border-stone-200 rounded-xl overflow-hidden mb-3">
+        <div class="max-h-64 overflow-y-auto divide-y divide-stone-100">
+          ${pv.rows.map((r) => `<div class="px-3 py-2 text-xs ${r.status === "error" ? "bg-rose-50/50" : ""}">
+            <div class="flex items-center justify-between gap-2">
+              <div class="min-w-0"><span class="text-stone-400 font-mono">#${r.excelRow}</span> <span class="font-medium text-stone-800">${escHtml(r.data.nama) || "(tanpa nama)"}</span> <span class="font-mono text-stone-500">${escHtml(r.data.nik)}</span></div>
+              ${badge[r.status]}
+            </div>
+            ${r.errors.map((e) => `<div class="text-rose-600 mt-0.5">• ${e}</div>`).join("")}
+            ${r.warnings.map((w) => `<div class="text-amber-600 mt-0.5">• ${w}</div>`).join("")}
+          </div>`).join("")}
+        </div>
+      </div>
+      ${cnt.error > 0 ? `<p class="text-xs text-stone-500 mb-2">Baris error tidak akan diimpor. Perbaiki di Excel lalu upload ulang bila perlu.</p>` : ""}
+      ${pv.error ? `<p class="text-rose-600 text-xs mb-2">${escHtml(pv.error)}</p>` : ""}
+      <div class="flex justify-end gap-2 pt-1">
+        <button onclick="closeImportPreview()" ${pv.importing ? "disabled" : ""} class="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg disabled:opacity-50">Batal</button>
+        <button onclick="runParticipantImport()" ${pv.importing || willWrite === 0 ? "disabled" : ""} class="px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg disabled:opacity-50">
+          ${pv.importing ? "Mengimpor…" : `Impor ${willWrite} Peserta`}
+        </button>
+      </div>`;
+  }
+  return `<div class="fixed inset-0 bg-stone-900/40 flex items-center justify-center p-4 z-50" onclick="${close}">
+    <div class="bg-white rounded-2xl p-5 sm:p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+      <div class="flex items-center justify-between mb-1">
+        <h3 class="font-display font-semibold text-lg text-stone-900">Impor Peserta dari Excel</h3>
+        <button onclick="${close}" class="text-stone-400 hover:text-stone-700 w-5 h-5">${ICON.x}</button>
+      </div>
+      <p class="text-xs text-stone-400 mb-4 truncate">${escHtml(pv.fileName)}</p>
+      ${body}
+    </div>
+  </div>`;
 }
 
 function adminDetailHTML() {
@@ -1193,6 +1499,7 @@ function participantFormModal() {
   const ed = state.editing;
   const fields = [
     ["nama", "Nama Lengkap", "text"], ["nik", "NIK", "text"], ["noTelpon", "No. Telpon", "text"],
+    ["cabang", "Cabang", "text"], ["departemen", "Departemen", "text"],
     ["jumlahTanggungan", "Jumlah Tanggungan", "number"], ["jenisUsaha", "Jenis Usaha", "text"], ["produkUsaha", "Produk Usaha", "text"],
   ];
   return `<div class="fixed inset-0 bg-stone-900/40 flex items-center justify-center p-4 z-50" onclick="closeParticipantForm()">
@@ -1202,6 +1509,8 @@ function participantFormModal() {
         <button onclick="closeParticipantForm()" class="text-stone-400 hover:text-stone-700 w-5 h-5">${ICON.x}</button>
       </div>
       <form onsubmit="saveParticipantForm(event)" class="space-y-3">
+        <datalist id="dl-cabang">${distinctValues(state.participants, "cabang").map((v) => `<option value="${escHtml(v)}"></option>`).join("")}</datalist>
+        <datalist id="dl-departemen">${distinctValues(state.participants, "departemen").map((v) => `<option value="${escHtml(v)}"></option>`).join("")}</datalist>
 
         <div class="flex items-center gap-4">
           <div id="photoPreviewWrap" class="w-20 h-20 rounded-xl overflow-hidden bg-stone-100 border border-stone-200 flex-shrink-0 flex items-center justify-center">
@@ -1225,10 +1534,10 @@ function participantFormModal() {
               </div>`;
             }
             return `
-            <div class="${key === "nama" ? "col-span-2" : ""}">
+            <div class="${key === "nama" || key === "produkUsaha" ? "col-span-2" : ""}">
               <label class="text-xs font-medium text-stone-500 block mb-1">${label}</label>
-              <input name="${key}" type="${type}"
-                value="${ed ? (ed[key] ?? "") : ""}"
+              <input name="${key}" type="${type}" ${key === "cabang" || key === "departemen" ? `list="dl-${key}" autocomplete="off" placeholder="Ketik atau pilih"` : ""}
+                value="${escHtml(ed ? (ed[key] ?? "") : "")}"
                 class="w-full border border-stone-300 rounded-lg px-3 py-2 text-sm" />
             </div>`;
           }).join("")}
