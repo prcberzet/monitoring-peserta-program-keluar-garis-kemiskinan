@@ -762,7 +762,8 @@ function parseParticipantSheet(arrayBuffer, existingNiks) {
 function handleParticipantExcel(input) {
   const file = input.files && input.files[0];
   input.value = ""; // agar file yang sama bisa dipilih ulang
-  if (!file) return;
+  state.uploadMenuOpen = false;
+  if (!file) { render(); return; }
   if (typeof XLSX === "undefined") { alert("Library Excel belum termuat. Periksa koneksi internet lalu coba lagi."); return; }
   const reader = new FileReader();
   reader.onload = (ev) => {
@@ -780,6 +781,416 @@ function handleParticipantExcel(input) {
 }
 function closeImportPreview() { state.importPreview = null; render(); }
 function toggleImportUpdate(checked) { state.importPreview.updateExisting = checked; render(); }
+
+/* =====================================================================
+   IMPOR UPDATE PENDAPATAN DARI EXCEL
+   Dua format didukung (dikenali otomatis dari judul kolom):
+   (1) Lebar  : kolom NIK + satu kolom per bulan ("Maret 2026", "Mar-26", "2026-03", sel tanggal, dst.)
+                -> nilai sel = total pendapatan bulan itu.
+   (2) Panjang: kolom NIK + Tanggal (atau Bulan/Periode) + Jumlah (+ Catatan)
+                -> tanggal lengkap = satu entri pada tanggal itu; hanya bulan = total bulanan.
+   ===================================================================== */
+const MONTH_WORDS = { januari: 1, jan: 1, january: 1, februari: 2, pebruari: 2, feb: 2, february: 2, maret: 3, mar: 3, march: 3, april: 4, apr: 4, mei: 5, may: 5, juni: 6, jun: 6, june: 6, juli: 7, jul: 7, july: 7, agustus: 8, agu: 8, agt: 8, ags: 8, aug: 8, august: 8, september: 9, sep: 9, sept: 9, oktober: 10, okt: 10, oct: 10, october: 10, november: 11, nov: 11, nopember: 11, desember: 12, des: 12, dec: 12, december: 12 };
+const pad2 = (n) => String(n).padStart(2, "0");
+const isDateObj = (v) => Object.prototype.toString.call(v) === "[object Date]" && !isNaN(v);
+function lastDayOfMonth(ym) { const [y, m] = ym.split("-").map(Number); return new Date(y, m, 0).getDate(); }
+function ymdFromDateObj(d) {
+  const x = new Date(d.getTime() + 12 * 3600 * 1000); // geser 12 jam: kebal terhadap selisih zona waktu/detik dari SheetJS
+  return { y: x.getFullYear(), m: x.getMonth() + 1, d: x.getDate() };
+}
+function ymdFromSerial(n) {
+  const x = new Date(Math.round((n - 25569) * 86400 * 1000)); // serial Excel -> UTC
+  return { y: x.getUTCFullYear(), m: x.getUTCMonth() + 1, d: x.getUTCDate() };
+}
+/* Judul kolom bulan -> { ym, yearAssumed } atau null */
+function parseMonthHeader(v) {
+  let ymd = null;
+  if (isDateObj(v)) ymd = ymdFromDateObj(v);
+  else if (typeof v === "number" && v >= 36526 && v <= 73000) ymd = ymdFromSerial(v);
+  if (ymd) return { ym: `${ymd.y}-${pad2(ymd.m)}`, yearAssumed: false };
+  const s = String(v == null ? "" : v).trim().toLowerCase();
+  if (!s) return null;
+  let m = s.match(/^(20\d{2})\s*[-\/.]\s*(\d{1,2})(?:\s*[-\/.]\s*\d{1,2})?$/);
+  if (m && +m[2] >= 1 && +m[2] <= 12) return { ym: `${m[1]}-${pad2(+m[2])}`, yearAssumed: false };
+  m = s.match(/^(\d{1,2})\s*[-\/.]\s*(20\d{2})$/);
+  if (m && +m[1] >= 1 && +m[1] <= 12) return { ym: `${m[2]}-${pad2(+m[1])}`, yearAssumed: false };
+  const tok = (s.match(/[a-z]+/g) || []).find((t) => MONTH_WORDS[t]);
+  if (!tok) return null;
+  const mon = MONTH_WORDS[tok];
+  const y4 = s.match(/(?:^|[^\d])(20\d{2})(?!\d)/);
+  if (y4) return { ym: `${y4[1]}-${pad2(mon)}`, yearAssumed: false };
+  const y2 = s.match(/(?:^|[\s\-\/'’.])(\d{2})\s*$/);
+  if (y2) return { ym: `${2000 + +y2[1]}-${pad2(mon)}`, yearAssumed: false };
+  return { ym: `${new Date().getFullYear()}-${pad2(mon)}`, yearAssumed: true };
+}
+/* Sel tanggal/bulan (format panjang) -> { ym, day|null, yearAssumed } atau null */
+function parseDateCell(v) {
+  let ymd = null;
+  if (isDateObj(v)) ymd = ymdFromDateObj(v);
+  else if (typeof v === "number" && v >= 36526 && v <= 73000) ymd = ymdFromSerial(v);
+  else {
+    const s = String(v == null ? "" : v).trim();
+    let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) ymd = { y: +m[1], m: +m[2], d: +m[3] };
+    else if ((m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/))) ymd = { y: +m[3], m: +m[2], d: +m[1] };
+  }
+  if (ymd) {
+    if (ymd.m < 1 || ymd.m > 12 || ymd.d < 1 || ymd.d > 31) return null;
+    return { ym: `${ymd.y}-${pad2(ymd.m)}`, day: ymd.d, yearAssumed: false };
+  }
+  const mh = parseMonthHeader(v);
+  return mh ? { ym: mh.ym, day: null, yearAssumed: mh.yearAssumed } : null;
+}
+function parseIncomeAmount(raw) {
+  const s = String(raw == null ? "" : raw).trim();
+  if (s === "" || /^[-–—]+$/.test(s)) return { value: null };
+  return parseRupiahCell(raw);
+}
+
+const INCOME_COLS = {
+  nik: ["nik", "nomorinduk", "nomornik", "noktp", "ktp", "nomorktp"],
+  nama: ["nama", "namalengkap", "namaopsional", "namapeserta"],
+  jumlah: ["jumlah", "pendapatan", "penghasilan", "nominal", "omzet", "jumlahpendapatan", "pendapatanrp", "jumlahrp"],
+  tanggal: ["tanggal", "tgl", "bulan", "periode", "waktu", "tanggalinput", "bulanpendapatan"],
+  catatan: ["catatan", "keterangan", "note", "notes"],
+};
+
+function parseIncomeSheet(arrayBuffer, participants) {
+  const wb = XLSX.read(arrayBuffer, { type: "array", cellDates: true });
+  const sheetName = wb.SheetNames.find((n) => /pendapatan/i.test(n)) || wb.SheetNames[0];
+  const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: true, defval: "" });
+  if (aoa.length === 0) throw new Error("File Excel kosong.");
+  const find = (aliases, row) => row.findIndex((h) => aliases.includes(normHeader(h)));
+
+  // baris judul = baris (dalam 10 baris pertama) yang memuat kolom NIK
+  let hr = -1;
+  for (let i = 0; i < Math.min(aoa.length, 10); i++) if (find(INCOME_COLS.nik, aoa[i]) >= 0) { hr = i; break; }
+  if (hr < 0) throw new Error("Kolom \"NIK\" tidak ditemukan di baris judul. Unduh template pendapatan dari menu Upload Excel untuk melihat formatnya.");
+  const head = aoa[hr];
+  const cNik = find(INCOME_COLS.nik, head), cNama = find(INCOME_COLS.nama, head);
+  const cJml = find(INCOME_COLS.jumlah, head), cTgl = find(INCOME_COLS.tanggal, head), cCat = find(INCOME_COLS.catatan, head);
+
+  const byNik = new Map(participants.map((p) => [p.nik, p]));
+  const curYM = currentYM(), today = todayISO();
+  const groups = [], groupOf = new Map(), seenKey = new Set();
+  const monthsFound = new Set();
+  let format = "", yearAssumedAny = false;
+
+  const readNik = (raw, errors) => {
+    let nik = "";
+    if (typeof raw === "number") {
+      if (raw >= 1e15) errors.push("NIK tersimpan sebagai angka sehingga digit terakhir terpotong — ubah format kolom NIK menjadi Teks");
+      nik = String(Math.round(raw));
+    } else nik = String(raw == null ? "" : raw).trim();
+    if (!nik) errors.push("NIK kosong");
+    else if (!/^\d+$/.test(nik)) errors.push("NIK harus berisi angka saja");
+    return nik;
+  };
+  const getGroup = (nik, namaFile, excelRow, errors, forceNew) => {
+    const p = byNik.get(nik);
+    if (nik && !errors.length && !p) errors.push("NIK tidak terdaftar sebagai peserta");
+    let g = !forceNew && groupOf.get(nik);
+    if (!g) {
+      g = { excelRow, nik, nama: p ? p.nama : namaFile, found: !!p, errors: [...errors], records: [] };
+      groups.push(g);
+      if (nik) groupOf.set(nik, g);
+    }
+    return g;
+  };
+  const addRecord = (g, rec) => {
+    const dupKey = `${g.nik}|${rec.ym}|${rec.day == null ? "M" : rec.day + ":" + rec.amount}`;
+    if (rec.day == null && seenKey.has(dupKey)) { rec.status = "error"; rec.note = "bulan ini muncul lebih dari sekali untuk NIK yang sama di file"; }
+    seenKey.add(dupKey);
+    if (rec.ym > curYM) { rec.status = "error"; rec.note = "bulan belum berjalan"; }
+    else if (rec.day != null && `${rec.ym}-${pad2(rec.day)}` > today) { rec.status = "error"; rec.note = "tanggal di masa depan"; }
+    else if (rec.day != null && rec.day > lastDayOfMonth(rec.ym)) { rec.status = "error"; rec.note = "tanggal tidak valid"; }
+    if (rec.day == null) rec.tanggal = rec.ym === curYM ? today : `${rec.ym}-${pad2(lastDayOfMonth(rec.ym))}`;
+    else rec.tanggal = `${rec.ym}-${pad2(rec.day)}`;
+    monthsFound.add(rec.ym);
+    g.records.push(rec);
+  };
+
+  if (cJml >= 0 && cTgl >= 0) {
+    /* ---- format panjang ---- */
+    format = "long";
+    for (let i = hr + 1; i < aoa.length; i++) {
+      const raw = aoa[i];
+      if (!raw.some((v) => String(v).trim() !== "")) continue;
+      const errors = [];
+      const nik = readNik(raw[cNik], errors);
+      const g = getGroup(nik, cNama >= 0 ? String(raw[cNama]).trim() : "", i + 1, errors, false);
+      if (errors.length && !g.errors.length) g.errors.push(...errors);
+      if (!g.found && !nik) { continue; }
+      const amt = parseIncomeAmount(raw[cJml]);
+      const dt = parseDateCell(raw[cTgl]);
+      const rec = { excelRow: i + 1, amount: amt.value, catatan: cCat >= 0 ? String(raw[cCat]).trim() : "", status: "", note: "" };
+      if (amt.error) { Object.assign(rec, { ym: "?", day: null, status: "error", note: `nilai "${raw[cJml]}" tidak valid`, amount: null }); g.records.push(rec); continue; }
+      if (amt.value === null) continue; // sel jumlah kosong -> abaikan
+      if (!dt) { Object.assign(rec, { ym: "?", day: null, status: "error", note: `tanggal/bulan "${raw[cTgl]}" tidak dikenali` }); g.records.push(rec); continue; }
+      rec.ym = dt.ym; rec.day = dt.day; if (dt.yearAssumed) yearAssumedAny = true;
+      addRecord(g, rec);
+    }
+  } else {
+    /* ---- format lebar ---- */
+    format = "wide";
+    const monthCols = [];
+    const seenYM = new Map();
+    head.forEach((h, idx) => {
+      if (idx === cNik || idx === cNama || idx === cCat) return;
+      if (String(h).trim() === "") return;
+      const mh = parseMonthHeader(h);
+      if (!mh) return;
+      if (seenYM.has(mh.ym)) throw new Error(`Kolom bulan ganda: "${h}" dan "${head[seenYM.get(mh.ym)]}" sama-sama dibaca sebagai ${monthLabel(mh.ym)}.`);
+      seenYM.set(mh.ym, idx);
+      if (mh.yearAssumed) yearAssumedAny = true;
+      monthCols.push({ idx, ym: mh.ym });
+    });
+    if (monthCols.length === 0) throw new Error("Tidak ada kolom bulan yang dikenali. Gunakan judul seperti \"Maret 2026\", \"Mar-26\" atau \"2026-03\" — atau format panjang dengan kolom NIK, Tanggal, Jumlah.");
+    monthCols.sort((a, b) => a.ym.localeCompare(b.ym));
+    for (let i = hr + 1; i < aoa.length; i++) {
+      const raw = aoa[i];
+      if (!raw.some((v) => String(v).trim() !== "")) continue;
+      const errors = [];
+      const nik = readNik(raw[cNik], errors);
+      const g = getGroup(nik, cNama >= 0 ? String(raw[cNama]).trim() : "", i + 1, errors, true);
+      if (nik && groups.filter((x) => x.nik === nik).length > 1) g.errors.push("NIK ganda di dalam file");
+      let any = false;
+      monthCols.forEach((mc) => {
+        const amt = parseIncomeAmount(raw[mc.idx]);
+        if (amt.error) { g.records.push({ excelRow: i + 1, ym: mc.ym, day: null, amount: null, catatan: "", status: "error", note: `nilai "${raw[mc.idx]}" tidak valid` }); any = true; return; }
+        if (amt.value === null) return;
+        any = true;
+        addRecord(g, { excelRow: i + 1, ym: mc.ym, day: null, amount: amt.value, catatan: cCat >= 0 ? String(raw[cCat]).trim() : "", status: "", note: "" });
+      });
+      if (!any && !g.errors.length) g.warning = "tidak ada nilai pendapatan di baris ini";
+    }
+  }
+  if (groups.length === 0) throw new Error("Tidak ada baris data pendapatan yang terbaca di file ini.");
+  return { groups, format, months: [...monthsFound].sort(), yearAssumed: yearAssumedAny, sheetName };
+}
+
+/* Tentukan apa yang akan terjadi pada tiap catatan (baru / diperbarui / ditimpa / dilewati). */
+function classifyIncomeImport(imp) {
+  imp.groups.forEach((g) => {
+    const existing = (state.incomeMap[g.nik] || []);
+    g.records.forEach((r) => {
+      if (r.status === "error") return;
+      r.deleteIds = []; r.conflict = false; r.status = "new"; r.note = "";
+      const sameMonth = existing.filter((e) => (e.tanggal || "").slice(0, 7) === r.ym);
+      if (r.day == null) {
+        r.docId = `imp-${r.ym}`;
+        if (sameMonth.length === 0) return;
+        const onlyImport = sameMonth.every((e) => e.id === r.docId);
+        if (onlyImport) {
+          if (Number(sameMonth[0].jumlah) === r.amount) { r.status = "same"; r.note = "nilai sama dengan data sebelumnya"; }
+          else { r.status = "update"; r.note = `sebelumnya ${rupiah(sameMonth[0].jumlah)}`; }
+          return;
+        }
+        r.conflict = true;
+        const tot = sameMonth.reduce((s, e) => s + (Number(e.jumlah) || 0), 0);
+        r.note = `bulan ini sudah ada ${sameMonth.length} data (${rupiah(tot)})`;
+        if (imp.mode === "replace") { r.status = "replace"; r.deleteIds = sameMonth.filter((e) => e.id !== r.docId).map((e) => e.id); }
+        else r.status = "skip";
+      } else {
+        const dup = existing.find((e) => e.tanggal === r.tanggal && Number(e.jumlah) === r.amount);
+        if (dup) { r.status = "skip"; r.note = "data dengan tanggal & nilai sama sudah ada"; }
+      }
+    });
+  });
+}
+function incomeImportCounts(imp) {
+  const c = { people: 0, new: 0, update: 0, replace: 0, skip: 0, same: 0, error: 0, conflict: 0, badRows: 0 };
+  imp.groups.forEach((g) => {
+    if (g.errors.length) { c.badRows++; return; }
+    let w = 0;
+    g.records.forEach((r) => {
+      c[r.status]++; if (r.conflict) c.conflict++;
+      if (["new", "update", "replace"].includes(r.status)) w++;
+    });
+    if (w) c.people++;
+  });
+  return c;
+}
+
+function handleIncomeExcel(input) {
+  const file = input.files && input.files[0];
+  input.value = "";
+  state.uploadMenuOpen = false;
+  if (!file) { render(); return; }
+  if (typeof XLSX === "undefined") { alert("Library Excel belum termuat. Periksa koneksi internet lalu coba lagi."); render(); return; }
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    try {
+      const res = parseIncomeSheet(ev.target.result, state.participants);
+      state.incomeImport = { fileName: file.name, ...res, mode: "skip", importing: false, result: null, error: "" };
+      classifyIncomeImport(state.incomeImport);
+    } catch (err) {
+      state.incomeImport = { fileName: file.name, groups: [], months: [], mode: "skip", importing: false, result: null, error: err.message || "Gagal membaca file Excel." };
+    }
+    render();
+  };
+  reader.onerror = () => { state.incomeImport = { fileName: file.name, groups: [], months: [], mode: "skip", importing: false, result: null, error: "Gagal membaca file." }; render(); };
+  reader.readAsArrayBuffer(file);
+}
+function closeIncomeImport() { state.incomeImport = null; render(); }
+function setIncomeImportMode(mode) { state.incomeImport.mode = mode; classifyIncomeImport(state.incomeImport); render(); }
+
+async function runIncomeImport() {
+  const imp = state.incomeImport;
+  if (!imp || imp.importing) return;
+  const ops = [];
+  let people = new Set(), cNew = 0, cUpd = 0, cRep = 0;
+  imp.groups.forEach((g) => {
+    if (g.errors.length) return;
+    const col = db.collection("participants").doc(g.nik).collection("income");
+    g.records.forEach((r) => {
+      if (!["new", "update", "replace"].includes(r.status)) return;
+      r.deleteIds.forEach((id) => ops.push({ type: "delete", ref: col.doc(id) }));
+      const ref = r.day == null ? col.doc(r.docId) : col.doc();
+      ops.push({ type: "set", ref, data: { tanggal: r.tanggal, jumlah: r.amount, catatan: r.catatan || (r.day == null ? "Impor Excel (total bulanan)" : "Impor Excel"), sumber: "import-excel" } });
+      people.add(g.nik);
+      if (r.status === "new") cNew++; else if (r.status === "update") cUpd++; else cRep++;
+    });
+  });
+  if (ops.length === 0) return;
+  imp.importing = true; imp.error = ""; render();
+  try {
+    for (let i = 0; i < ops.length; i += 400) {
+      const batch = db.batch();
+      ops.slice(i, i + 400).forEach((o) => (o.type === "delete" ? batch.delete(o.ref) : batch.set(o.ref, o.data)));
+      await batch.commit();
+    }
+    const c = incomeImportCounts(imp);
+    imp.result = { people: people.size, created: cNew, updated: cUpd, replaced: cRep, skipped: c.skip + c.same, errors: c.error + c.badRows };
+  } catch (err) {
+    console.error("[Langkah Mandiri] Impor pendapatan gagal:", err);
+    imp.error = "Impor gagal sebagian/seluruhnya: " + (err && err.message ? err.message : "periksa koneksi & izin akses.");
+  }
+  imp.importing = false;
+  render();
+}
+
+function incomeImportModal() {
+  const imp = state.incomeImport;
+  const c = imp.groups.length ? incomeImportCounts(imp) : null;
+  const willWrite = c ? c.new + c.update + c.replace : 0;
+  const close = imp.importing ? "" : "closeIncomeImport()";
+  const chipCls = { new: "bg-emerald-50 text-emerald-700 border-emerald-200", update: "bg-sky-50 text-sky-700 border-sky-200", replace: "bg-amber-50 text-amber-700 border-amber-200", skip: "bg-stone-100 text-stone-500 border-stone-200", same: "bg-stone-100 text-stone-500 border-stone-200", error: "bg-rose-50 text-rose-700 border-rose-200" };
+  const chipTxt = { new: "baru", update: "diperbarui", replace: "menimpa data bulan ini", skip: "dilewati", same: "tidak berubah", error: "error" };
+  let body;
+  if (imp.result) {
+    const r = imp.result;
+    body = `<div class="rounded-xl bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-800 space-y-1">
+        <div class="font-semibold">Impor pendapatan selesai.</div>
+        <div>${r.created + r.updated + r.replaced} data bulanan/harian ditulis untuk ${r.people} peserta (${r.created} baru${r.updated ? `, ${r.updated} diperbarui` : ""}${r.replaced ? `, ${r.replaced} menimpa data lama` : ""})${r.skipped ? `; ${r.skipped} dilewati` : ""}${r.errors ? `; ${r.errors} baris/entri error tidak diimpor` : ""}.</div>
+      </div>
+      <div class="flex justify-end pt-3"><button onclick="closeIncomeImport()" class="px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg">Tutup</button></div>`;
+  } else if (imp.groups.length === 0) {
+    body = `<p class="text-rose-600 text-sm">${escHtml(imp.error)}</p>
+      <div class="flex justify-end pt-3"><button onclick="closeIncomeImport()" class="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg">Tutup</button></div>`;
+  } else {
+    body = `<div class="rounded-xl bg-stone-50 border border-stone-200 p-3 mb-3 text-xs text-stone-600 space-y-1">
+        <div><span class="font-semibold text-stone-800">Format terbaca:</span> ${imp.format === "wide" ? "satu kolom per bulan" : "satu baris per pencatatan (NIK, Tanggal/Bulan, Jumlah)"}</div>
+        <div><span class="font-semibold text-stone-800">Bulan terdeteksi (${imp.months.length}):</span> ${imp.months.map((m) => monthLabel(m)).join(", ") || "-"}</div>
+        ${imp.yearAssumed ? `<div class="text-amber-700">Beberapa judul bulan tanpa tahun — dianggap tahun ${new Date().getFullYear()}. Periksa daftar bulan di atas.</div>` : ""}
+      </div>
+      <div class="grid grid-cols-3 gap-2 mb-3 text-center">
+        <div class="rounded-xl bg-emerald-50 p-2.5"><div class="font-display font-bold text-xl text-emerald-700">${c.people}</div><div class="text-[11px] text-emerald-700">Peserta diperbarui</div></div>
+        <div class="rounded-xl bg-sky-50 p-2.5"><div class="font-display font-bold text-xl text-sky-700">${willWrite}</div><div class="text-[11px] text-sky-700">Data pendapatan</div></div>
+        <div class="rounded-xl bg-rose-50 p-2.5"><div class="font-display font-bold text-xl text-rose-700">${c.error + c.badRows}</div><div class="text-[11px] text-rose-700">Error</div></div>
+      </div>
+      ${c.conflict > 0 ? `<div class="rounded-xl border border-amber-200 bg-amber-50/60 p-3 mb-3 text-xs text-stone-700">
+        <div class="font-semibold text-amber-800 mb-1.5">${c.conflict} bulan sudah punya data pendapatan (input peserta/admin)</div>
+        <label class="flex items-start gap-2 mb-1 cursor-pointer"><input type="radio" name="impmode" class="mt-0.5" ${imp.mode === "skip" ? "checked" : ""} onchange="setIncomeImportMode('skip')" /><span><b>Lewati</b> bulan tersebut (data lama dipertahankan, tidak ada angka ganda)</span></label>
+        <label class="flex items-start gap-2 cursor-pointer"><input type="radio" name="impmode" class="mt-0.5" ${imp.mode === "replace" ? "checked" : ""} onchange="setIncomeImportMode('replace')" /><span><b>Timpa</b>: hapus data lama bulan tersebut, ganti dengan total dari Excel</span></label>
+      </div>` : ""}
+      <div class="border border-stone-200 rounded-xl overflow-hidden mb-3">
+        <div class="max-h-72 overflow-y-auto divide-y divide-stone-100">
+          ${imp.groups.map((g) => `<div class="px-3 py-2 text-xs ${g.errors.length ? "bg-rose-50/50" : ""}">
+            <div class="flex items-center justify-between gap-2">
+              <div class="min-w-0"><span class="text-stone-400 font-mono">#${g.excelRow}</span> <span class="font-medium text-stone-800">${escHtml(g.nama) || "(tanpa nama)"}</span> <span class="font-mono text-stone-500">${escHtml(g.nik)}</span></div>
+              ${g.errors.length ? `<span class="text-[11px] font-semibold text-rose-700 bg-rose-100 rounded-full px-2 py-0.5">Error</span>` : ""}
+            </div>
+            ${g.errors.map((e) => `<div class="text-rose-600 mt-0.5">• ${escHtml(e)}</div>`).join("")}
+            ${g.warning ? `<div class="text-amber-600 mt-0.5">• ${escHtml(g.warning)}</div>` : ""}
+            ${g.errors.length ? "" : `<div class="flex flex-wrap gap-1.5 mt-1.5">${g.records.map((r) => `<span class="inline-flex items-center gap-1 border rounded-md px-1.5 py-0.5 ${chipCls[r.status]}" title="${escHtml(r.note || "")}">
+              <b>${r.ym === "?" ? "?" : escHtml(r.day != null ? fmtDate(r.tanggal) : monthLabel(r.ym))}</b>
+              ${r.amount != null ? `<span class="font-mono">${rupiah(r.amount)}</span>` : ""}
+              <span class="opacity-75">· ${chipTxt[r.status]}${r.note && ["skip", "error", "update", "replace"].includes(r.status) ? ` (${escHtml(r.note)})` : ""}</span></span>`).join("")}</div>`}
+          </div>`).join("")}
+        </div>
+      </div>
+      <p class="text-[11px] text-stone-400 mb-3">Total bulanan disimpan sebagai satu data pendapatan bulan itu (bulan berjalan: bertanggal hari ini), sehingga masuk ke grafik, status & tingkat kemandirian seperti biasa. Mengunggah ulang file yang sama tidak menggandakan angka.</p>
+      ${imp.error ? `<p class="text-rose-600 text-xs mb-2">${escHtml(imp.error)}</p>` : ""}
+      <div class="flex justify-end gap-2 pt-1">
+        <button onclick="closeIncomeImport()" ${imp.importing ? "disabled" : ""} class="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg disabled:opacity-50">Batal</button>
+        <button onclick="runIncomeImport()" ${imp.importing || willWrite === 0 ? "disabled" : ""} class="px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg disabled:opacity-50">
+          ${imp.importing ? "Mengimpor…" : `Impor ${willWrite} Data Pendapatan`}
+        </button>
+      </div>`;
+  }
+  return `<div class="fixed inset-0 bg-stone-900/40 flex items-center justify-center p-4 z-50" onclick="${close}">
+    <div class="bg-white rounded-2xl p-5 sm:p-6 max-w-xl w-full max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+      <div class="flex items-center justify-between mb-1">
+        <h3 class="font-display font-semibold text-lg text-stone-900">Impor Update Pendapatan dari Excel</h3>
+        <button onclick="${close}" class="text-stone-400 hover:text-stone-700 w-5 h-5">${ICON.x}</button>
+      </div>
+      <p class="text-xs text-stone-400 mb-4 truncate">${escHtml(imp.fileName)}</p>
+      ${body}
+    </div>
+  </div>`;
+}
+
+/* ---------- Template Excel pendapatan ---------- */
+function buildIncomeTemplate(ExcelLib) {
+  const wb = new ExcelLib.Workbook();
+  const ws = wb.addWorksheet("Pendapatan Bulanan", { views: [{ state: "frozen", xSplit: 2, ySplit: 1 }] });
+  const months = [];
+  const now = new Date();
+  for (let i = 5; i >= 0; i--) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); months.push(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}`); }
+  const headers = ["NIK", "Nama (opsional)", ...months.map((m) => monthLabel(m))];
+  const hr = ws.addRow(headers);
+  hr.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDD5623" } };
+    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+  });
+  hr.height = 24;
+  ws.getColumn(1).width = 22; ws.getColumn(2).width = 30;
+  months.forEach((_, i) => { ws.getColumn(3 + i).width = 17; });
+  const list = [...state.participants].sort((a, b) => (a.nama || "").localeCompare(b.nama || "", "id"));
+  const rowsN = Math.max(list.length, 3);
+  for (let i = 0; i < rowsN; i++) {
+    const p = list[i];
+    const r = ws.addRow([p ? p.nik : "", p ? p.nama : ""]);
+    r.getCell(1).numFmt = "@"; r.getCell(1).value = p ? String(p.nik) : "";
+    for (let k = 0; k < months.length; k++) r.getCell(3 + k).numFmt = "#,##0";
+    r.getCell(2).font = { color: { argb: "FF78716C" } };
+  }
+  const info = wb.addWorksheet("Petunjuk");
+  [
+    ["Cara mengisi template pendapatan", ""],
+    ["1. NIK", "Wajib, harus sama dengan NIK peserta yang sudah terdaftar. Kolom Nama hanya untuk memudahkan Anda dan tidak dipakai."],
+    ["2. Kolom bulan", "Isi total pendapatan peserta pada bulan tersebut (angka, tanpa titik/Rp — atau 1.500.000). Kosongkan jika tidak ada data. Isi 0 bila memang tidak ada pendapatan."],
+    ["3. Menambah bulan", "Tambahkan kolom baru di sebelah kanan dengan judul seperti \"Maret 2026\", \"Mar-26\", atau \"2026-03\". Judul tanpa tahun dianggap tahun berjalan."],
+    ["4. Bulan yang sudah ada datanya", "Saat impor Anda dapat memilih melewati atau menimpa bulan yang sudah punya data (input peserta). Mengunggah ulang file yang sama tidak menggandakan angka."],
+    ["5. Format alternatif", "File dengan kolom NIK, Tanggal (atau Bulan), Jumlah, dan Catatan (opsional) — satu baris per pencatatan — juga dapat dibaca. Tanggal lengkap menjadi satu entri pada tanggal itu."],
+    ["6. Catatan", "Bulan yang belum berjalan tidak dapat diimpor. Total bulan berjalan dicatat bertanggal hari impor."],
+  ].forEach((r) => info.addRow(r));
+  info.getColumn(1).width = 30; info.getColumn(2).width = 100;
+  info.getColumn(1).font = { bold: true };
+  info.getColumn(2).alignment = { wrapText: true, vertical: "top" };
+  info.getRow(1).font = { bold: true, size: 13 };
+  return wb;
+}
+async function downloadIncomeTemplate() {
+  state.uploadMenuOpen = false;
+  if (typeof ExcelJS === "undefined") { alert("Library Excel belum termuat. Periksa koneksi internet lalu coba lagi."); render(); return; }
+  try { await downloadWorkbook(buildIncomeTemplate(ExcelJS), "Template_Pendapatan_Peserta_Langkah_Mandiri.xlsx"); }
+  catch (err) { console.error("[Langkah Mandiri] Gagal membuat template pendapatan:", err); alert("Gagal membuat template Excel pendapatan."); }
+  render();
+}
+function toggleUploadMenu() { state.uploadMenuOpen = !state.uploadMenuOpen; render(); }
 
 async function runParticipantImport() {
   const pv = state.importPreview;
@@ -915,6 +1326,8 @@ let state = {
   showPovertyModal: false,
   syncError: null,
   importPreview: null,
+  incomeImport: null,
+  uploadMenuOpen: false,
   filterCabang: "",
   filterDepartemen: "",
   search: "",
@@ -1564,10 +1977,27 @@ function adminHTML() {
             <button onclick="downloadParticipantTemplate()" title="Unduh template Excel peserta" class="inline-flex items-center gap-1 text-xs font-medium text-stone-500 hover:text-brand-700 hover:bg-stone-100 rounded-md px-2 py-1.5">
               <span class="w-3.5 h-3.5">${ICON.download}</span> Template Excel
             </button>
-            <label class="inline-flex items-center gap-1.5 text-sm font-semibold text-brand-700 bg-brand-50 border border-brand-200 hover:bg-brand-100 rounded-lg px-3 py-2 cursor-pointer">
-              Upload Excel
-              <input type="file" accept=".xlsx,.xls" class="hidden" onchange="handleParticipantExcel(this)" />
-            </label>
+            <div class="relative">
+              <button onclick="toggleUploadMenu()" aria-haspopup="true" aria-expanded="${state.uploadMenuOpen}" class="inline-flex items-center gap-1.5 text-sm font-semibold text-brand-700 bg-brand-50 border border-brand-200 hover:bg-brand-100 rounded-lg px-3 py-2">
+                Upload Excel <span class="w-3.5 h-3.5 transition-transform ${state.uploadMenuOpen ? "rotate-180" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-full h-full"><path d="m6 9 6 6 6-6"/></svg></span>
+              </button>
+              ${state.uploadMenuOpen ? `<div class="fixed inset-0 z-40" onclick="toggleUploadMenu()"></div>
+              <div class="absolute right-0 mt-1.5 w-72 bg-white rounded-xl border border-stone-200 shadow-lg z-50 overflow-hidden">
+                <label class="block px-4 py-3 hover:bg-stone-50 cursor-pointer border-b border-stone-100">
+                  <div class="text-sm font-semibold text-stone-800">Upload Data Peserta Program</div>
+                  <div class="text-[11px] text-stone-400 mt-0.5">Tambah/perbarui data peserta dari template peserta.</div>
+                  <input type="file" accept=".xlsx,.xls" class="hidden" onchange="handleParticipantExcel(this)" />
+                </label>
+                <label class="block px-4 py-3 hover:bg-stone-50 cursor-pointer">
+                  <div class="text-sm font-semibold text-stone-800">Upload Update Pendapatan</div>
+                  <div class="text-[11px] text-stone-400 mt-0.5">Baca pendapatan per NIK, diekstrak per bulan.</div>
+                  <input type="file" accept=".xlsx,.xls" class="hidden" onchange="handleIncomeExcel(this)" />
+                </label>
+                <button onclick="downloadIncomeTemplate()" class="w-full text-left px-4 py-2 text-xs font-medium text-brand-700 hover:bg-stone-50 border-t border-stone-100 inline-flex items-center gap-1.5">
+                  <span class="w-3.5 h-3.5">${ICON.download}</span> Unduh template pendapatan
+                </button>
+              </div>` : ""}
+            </div>
             <button onclick="openParticipantForm(null)" class="inline-flex items-center gap-1.5 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg px-3.5 py-2">
               <span class="w-4 h-4">${ICON.plus}</span> Tambah Peserta
             </button>
@@ -1593,7 +2023,8 @@ function adminHTML() {
   ${state.showForm ? participantFormModal() : ""}
   ${state.confirmDelete ? confirmDeleteModal() : ""}
   ${state.showPovertyModal ? povertyLineModal() : ""}
-  ${state.importPreview ? importPreviewModal() : ""}`;
+  ${state.importPreview ? importPreviewModal() : ""}
+  ${state.incomeImport ? incomeImportModal() : ""}`;
 }
 
 function importPreviewModal() {
